@@ -237,7 +237,64 @@ def warp_channel(gray, matrix, offset):
     return cv2.warpPerspective(gray, translation @ matrix, (640, 480))
 
 
-def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=False, progress=None):
+class TemporalRegistration:
+    """Corner-space low-pass filter with deadband and sustained-jump confirmation."""
+    MODES = {'strong': (.15, 1.0), 'balanced': (.3, .7), 'responsive': (.6, .3)}
+
+    def __init__(self, initial, mode='balanced'):
+        if mode not in self.MODES:
+            raise ValueError('안정화 모드는 strong, balanced, responsive 중 하나입니다')
+        self.alpha, self.deadband = self.MODES[mode]
+        self.last = initial
+        self.initialized = False
+        self.pending = None
+        self.pending_count = 0
+        self.corners = np.float32([[[0,0],[639,0],[639,479],[0,479]]])
+
+    def project(self, matrices):
+        return np.array([cv2.perspectiveTransform(self.corners, h)[0] for h in matrices[1:]])
+
+    def miss(self):
+        self.pending, self.pending_count = None, 0
+
+    def update(self, candidate):
+        if not self.initialized:
+            self.last, self.initialized = candidate, True
+            return self.last, 'initialized'
+        current, previous = self.project(candidate), self.project(self.last)
+        if not np.isfinite(current).all():
+            raise ValueError('유효하지 않은 모서리 투영')
+        shifts = np.max(np.linalg.norm(current - previous, axis=2), axis=1)
+        # A large single-frame estimate may be a switch of matched plane or an outlier.
+        if float(shifts.max()) > 30:
+            consistent = self.pending is not None and np.max(np.linalg.norm(current - self.pending, axis=2)) < 8
+            self.pending_count = self.pending_count + 1 if consistent else 1
+            self.pending = current
+            if self.pending_count < 3:
+                return self.last, 'held_jump'
+            # A sustained change is allowed to catch up, rather than freezing forever.
+            self.last = candidate
+            self.miss()
+            return self.last, 'reacquired'
+        self.miss()
+        smoothed = [candidate[0]]
+        changed = False
+        for j in range(2):
+            if shifts[j] <= self.deadband:
+                smoothed.append(self.last[j+1])
+                continue
+            changed = True
+            dest = self.alpha * current[j] + (1-self.alpha) * previous[j]
+            h = cv2.getPerspectiveTransform(self.corners[0], dest.astype(np.float32))
+            denominator = (h @ np.c_[self.corners[0], np.ones(4)].T)[2]
+            if not np.isfinite(h).all() or abs(np.linalg.det(h)) < 1e-10 or np.min(denominator) <= 0 <= np.max(denominator):
+                raise ValueError('안정화 변환이 유효하지 않습니다')
+            smoothed.append(h)
+        self.last = smoothed
+        return self.last, 'smoothed' if changed else 'held_small'
+
+
+def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=False, progress=None, stabilization='balanced'):
     """Nearest host timestamp matching; cam1 defines output timeline."""
     if sorted(mapping) != [0, 1, 2]:
         raise ValueError('RGB 채널에 서로 다른 카메라를 선택하세요')
@@ -247,6 +304,7 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
         raise ValueError('dynamic 값은 참/거짓이어야 합니다')
     matrices = registration_matrices(points, adjustments)
     last_valid = matrices
+    temporal = TemporalRegistration(matrices, stabilization)
     successful = 0
     fallback = 0
     log = None
@@ -288,44 +346,36 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
                 source_stamps.append(int(times[i][idx]))
                 gray.append(cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY))
             state, reason, quality = 'static', None, []
+            filter_state = None
             if dynamic:
                 try:
                     result = automatic_registration(gray)
                     candidate = registration_matrices(result['points'], adjustments)
-                    # Smooth projected image corners, rather than averaging matrix coefficients.
-                    # Do not blend a first detection with an unverified initial fallback.
-                    if successful:
-                        corners = np.float32([[[0,0],[639,0],[639,479],[0,479]]])
-                        smoothed = [candidate[0]]
-                        for i in (1,2):
-                            current = cv2.perspectiveTransform(corners, candidate[i])[0]
-                            previous = cv2.perspectiveTransform(corners, last_valid[i])[0]
-                            dest = .8 * current + .2 * previous
-                            h = cv2.getPerspectiveTransform(corners[0], dest.astype(np.float32))
-                            denominator = (h @ np.c_[corners[0], np.ones(4)].T)[2]
-                            if not np.isfinite(h).all() or abs(np.linalg.det(h)) < 1e-10 or np.min(denominator) <= 0 <= np.max(denominator):
-                                raise ValueError('안정화 변환이 유효하지 않습니다')
-                            smoothed.append(h)
-                        candidate = smoothed
-                    last_valid = candidate
-                    successful += 1
-                    state, quality = 'estimated', result['reports']
+                    last_valid, filter_state = temporal.update(candidate)
+                    quality = result['reports']
+                    if filter_state == 'held_jump':
+                        fallback += 1
+                        state, reason = 'fallback_previous', '큰 변환 변화: 연속 3회 일관된 추정 확인 대기'
+                    else:
+                        successful += 1
+                        state = 'estimated'
                 except (ValueError, cv2.error, np.linalg.LinAlgError) as exc:
+                    temporal.miss()
                     fallback += 1
                     state = 'fallback_previous' if successful else 'fallback_initial'
                     reason = str(exc)
                 matrices = last_valid
                 log.write(json.dumps({'frame': number, 'monotonic_ns': int(stamp),
                     'source_monotonic_ns': source_stamps, 'state': state, 'reason': reason,
-                    'quality': quality, 'matrices': [h.tolist() for h in matrices]}) + '\n')
+                    'filter_state': filter_state, 'quality': quality, 'matrices': [h.tolist() for h in matrices]}) + '\n')
             gray = [warp_channel(g, matrices[i], offsets[i]) for i, g in enumerate(gray)]
             if progress:
                 progress({'running': True, 'done': number+1, 'total': len(targets),
                           'estimated': successful, 'fallback': fallback})
             writer.write(cv2.merge([gray[mapping[2]], gray[mapping[1]], gray[mapping[0]]]))
-        (folder / 'alignment.json').write_text(json.dumps({'rgb_cameras': mapping, 'xy_offsets': offsets, 'points': points, 'adjustments': adjustments, 'dynamic': dynamic}, indent=2))
+        (folder / 'alignment.json').write_text(json.dumps({'rgb_cameras': mapping, 'xy_offsets': offsets, 'points': points, 'adjustments': adjustments, 'dynamic': dynamic, 'stabilization': stabilization}, indent=2))
         summary = {'file': str(destination), 'frames': len(targets), 'fps': round(fps, 2),
-                   'dynamic': dynamic, 'estimated': successful, 'fallback': fallback,
+                   'dynamic': dynamic, 'stabilization': stabilization, 'estimated': successful, 'fallback': fallback,
                    'warning': '자동 정합 성공 프레임이 없습니다. 초기 보정값만 사용했습니다.' if dynamic and not successful else None}
         if dynamic:
             (folder / 'registration_dynamic_summary.json').write_text(json.dumps({'completed': True, **summary}, indent=2))
@@ -396,7 +446,7 @@ def create_app(rig):
                 update_progress({'running': True, 'done': 0, 'total': 0})
                 try:
                     return jsonify(compose(folder, body['mapping'], body['offsets'], body.get('points'),
-                        body.get('adjustments'), body.get('dynamic', False), update_progress))
+                        body.get('adjustments'), body.get('dynamic', False), update_progress, body.get('stabilization', 'balanced')))
                 except Exception as exc:
                     update_progress({**processing['snapshot'], 'error': str(exc)})
                     raise

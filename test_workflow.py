@@ -7,7 +7,7 @@ import csv
 import json
 import cv2
 import numpy as np
-from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration
+from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration, TemporalRegistration
 
 
 class WorkflowTest(unittest.TestCase):
@@ -66,6 +66,37 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(len(response.json['reports']),2)
             self.assertFalse((folder/'alignment.json').exists())
 
+    def test_temporal_stability_and_motion(self):
+        def matrices(dx):
+            return [np.eye(3),np.array([[1.,0,dx],[0,1.,0],[0,0,1.]]),np.eye(3)]
+        initial=matrices(0)
+        temporal=TemporalRegistration(initial, 'strong')
+        temporal.update(initial)
+        raw, filtered=[],[]
+        for n in range(80):
+            dx=2 if n%2 else -2
+            result,event=temporal.update(matrices(dx))
+            raw.append(dx)
+            filtered.append(float(result[1][0,2]))
+        self.assertLess(np.std(filtered),np.std(raw)*.3)
+        before=temporal.last[1].copy()
+        result,event=temporal.update(matrices(80))
+        self.assertEqual(event,'held_jump')
+        np.testing.assert_allclose(result[1],before)
+        temporal.update(matrices(0))
+        # An isolated outlier is not adopted. A sustained real change can reacquire.
+        self.assertLess(abs(float(temporal.last[1][0,2])),1)
+        for n in range(3): result,event=temporal.update(matrices(80))
+        self.assertEqual(event,'reacquired')
+        self.assertAlmostEqual(float(result[1][0,2]),80)
+        temporal=TemporalRegistration(initial,'balanced')
+        temporal.update(initial)
+        for n in range(1,50):
+            result,event=temporal.update(matrices(n))
+        self.assertLess(abs(float(result[1][0,2])-49),3)
+        with self.assertRaises(ValueError):
+            TemporalRegistration(initial,'invalid')
+
     def test_dynamic_video_registration_and_fallback(self):
         rng = np.random.default_rng(9)
         texture = cv2.GaussianBlur(rng.integers(0,256,(480,640),dtype=np.uint8),(3,3),0)
@@ -88,7 +119,7 @@ class WorkflowTest(unittest.TestCase):
                 (folder/f'cam{i+1}.csv').write_text('frame,monotonic_ns\n'+''.join(f'{n},{1000000000+n*33333333}\n' for n in range(6)))
             client = create_app(Rig(demo=True,output=temp)).test_client()
             response = client.post('/api/compose',headers={'X-Rig-Request':'1'},json={
-                'session':'moving','mapping':[0,1,2],'offsets':[[0,0]]*3,'dynamic':True})
+                'session':'moving','mapping':[0,1,2],'offsets':[[0,0]]*3,'dynamic':True,'stabilization':'responsive'})
             self.assertEqual(response.status_code,200,response.json)
             self.assertEqual(response.json['estimated'],4)
             self.assertEqual(response.json['fallback'],2)
