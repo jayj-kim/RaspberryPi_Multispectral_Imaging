@@ -135,7 +135,7 @@ class WorkflowTest(unittest.TestCase):
                 (folder/f'cam{i+1}.csv').write_text('frame,monotonic_ns\n'+''.join(f'{n},{1000000000+n*33333333}\n' for n in range(6)))
             client = create_app(Rig(demo=True,output=temp)).test_client()
             response = client.post('/api/compose',headers={'X-Rig-Request':'1'},json={
-                'session':'moving','mapping':[0,1,2],'offsets':[[0,0]]*3,'dynamic':True,'stabilization':'responsive'})
+                'session':'moving','mapping':[0,1,2],'offsets':[[0,0]]*3,'dynamic':True,'stabilization':'responsive','registration_method':'tracking'})
             self.assertEqual(response.status_code,200,response.json)
             self.assertEqual(response.json['estimated'],4)
             self.assertEqual(response.json['fallback'],2)
@@ -168,6 +168,11 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(stabilized.status_code,200,stabilized.json)
             self.assertTrue(stabilized.json['file'].endswith('composite_dynamic_stabilized.avi'))
             self.assertTrue(Path(response.json['file']).is_file())
+            self.assertEqual(stabilized.json['registration_method'],'orb')
+            default_records=[json.loads(line) for line in (folder/'registration_dynamic.jsonl').read_text().splitlines()]
+            self.assertIn('orb',[r['method'] for r in default_records])
+            self.assertNotIn('optical_flow',[r['method'] for r in default_records])
+            self.assertTrue(response.json['file'].endswith('composite_dynamic_tracking.avi'))
             cap=cv2.VideoCapture(stabilized.json['file'])
             self.assertTrue(cap.read()[0]);cap.release()
             self.assertTrue(json.loads((folder/'alignment.json').read_text())['global_stabilization'])

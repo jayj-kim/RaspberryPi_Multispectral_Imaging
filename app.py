@@ -394,12 +394,14 @@ class TemporalRegistration:
         return self.last, 'smoothed' if changed else 'held_small'
 
 
-def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=False, progress=None, stabilization='balanced', global_stabilization=False):
+def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=False, progress=None, stabilization='balanced', global_stabilization=False, registration_method='orb'):
     """Nearest host timestamp matching; cam1 defines output timeline."""
     if sorted(mapping) != [0, 1, 2]:
         raise ValueError('RGB 채널에 서로 다른 카메라를 선택하세요')
     if len(offsets) != 3 or any(len(x) != 2 or not all(np.isfinite(v) and abs(v) <= 640 for v in x) for x in offsets):
         raise ValueError('이동값은 -640~640 범위의 숫자여야 합니다')
+    if registration_method not in ('orb', 'tracking'):
+        raise ValueError('정합 방식은 orb 또는 tracking이어야 합니다')
     if type(global_stabilization) is not bool:
         raise ValueError('전체 안정화 값은 참/거짓이어야 합니다')
     if global_stabilization and not dynamic:
@@ -430,7 +432,12 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
         targets = times[0][(times[0] >= begin) & (times[0] <= end)]
         if len(targets) < 2: raise ValueError('세 영상의 공통 촬영 구간이 부족합니다')
         fps = float(1e9 / np.median(np.diff(targets)))
-        destination = folder / ('composite_dynamic_stabilized.avi' if global_stabilization else 'composite_dynamic.avi' if dynamic else 'composite.avi')
+        output_name = 'composite_dynamic' if dynamic else 'composite'
+        if dynamic and registration_method == 'tracking':
+            output_name += '_tracking'
+        if global_stabilization:
+            output_name += '_stabilized'
+        destination = folder / (output_name + '.avi')
         if dynamic:
             log = (folder / 'registration_dynamic.jsonl').open('w')
             (folder / 'registration_dynamic_summary.json').write_text(json.dumps({'completed': False}))
@@ -460,8 +467,12 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
                 correction, global_report = whole_frame.update(gray[0])
             if dynamic:
                 try:
-                    result = tracker.estimate(gray)
-                    method = result['method']
+                    if registration_method == 'tracking':
+                        result = tracker.estimate(gray)
+                        method = result['method']
+                    else:
+                        result = automatic_registration(gray)
+                        method = 'orb'
                     candidate = registration_matrices(result['points'], adjustments)
                     last_valid, filter_state = temporal.update(candidate)
                     quality = result['reports']
@@ -488,9 +499,9 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
             if global_stabilization:
                 composite=cv2.warpAffine(composite,np.float32([[1,0,correction[0]],[0,1,correction[1]]]),(640,480))
             writer.write(composite)
-        (folder / 'alignment.json').write_text(json.dumps({'rgb_cameras': mapping, 'xy_offsets': offsets, 'points': points, 'adjustments': adjustments, 'dynamic': dynamic, 'stabilization': stabilization, 'global_stabilization': global_stabilization}, indent=2))
+        (folder / 'alignment.json').write_text(json.dumps({'rgb_cameras': mapping, 'xy_offsets': offsets, 'points': points, 'adjustments': adjustments, 'dynamic': dynamic, 'stabilization': stabilization, 'global_stabilization': global_stabilization, 'registration_method': registration_method}, indent=2))
         summary = {'file': str(destination), 'frames': len(targets), 'fps': round(fps, 2),
-                   'dynamic': dynamic, 'stabilization': stabilization, 'global_stabilization': global_stabilization, 'estimated': successful, 'fallback': fallback,
+                   'dynamic': dynamic, 'stabilization': stabilization, 'global_stabilization': global_stabilization, 'registration_method': registration_method, 'estimated': successful, 'fallback': fallback,
                    'warning': '자동 정합 성공 프레임이 없습니다. 초기 보정값만 사용했습니다.' if dynamic and not successful else None}
         if dynamic:
             (folder / 'registration_dynamic_summary.json').write_text(json.dumps({'completed': True, **summary}, indent=2))
@@ -561,7 +572,7 @@ def create_app(rig):
                 update_progress({'running': True, 'done': 0, 'total': 0})
                 try:
                     return jsonify(compose(folder, body['mapping'], body['offsets'], body.get('points'),
-                        body.get('adjustments'), body.get('dynamic', False), update_progress, body.get('stabilization', 'balanced'), body.get('global_stabilization', False)))
+                        body.get('adjustments'), body.get('dynamic', False), update_progress, body.get('stabilization', 'balanced'), body.get('global_stabilization', False), body.get('registration_method', 'orb')))
                 except Exception as exc:
                     update_progress({**processing['snapshot'], 'error': str(exc)})
                     raise
