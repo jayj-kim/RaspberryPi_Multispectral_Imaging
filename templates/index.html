@@ -20,8 +20,8 @@
 <h3>4점 원근 정합 — cam1 기준</h3>
 <p>같은 평면의 특징점 4개를 각 영상에서 <strong>동일한 순서</strong>로 클릭하세요. 예: 종이의 왼쪽 위 → 오른쪽 위 → 오른쪽 아래 → 왼쪽 아래. 점은 넓게 분포시키세요. cam1과 cam2부터 선택한 다음 cam3을 맞출 수 있습니다.</p>
 <p><small>아래 영상은 보정 전 원본입니다. 4점을 완성하면 위 중첩 미리보기에 자동 적용됩니다. 서로 다른 거리의 물체와 렌즈 왜곡은 한 번의 원근 변환으로 모두 맞지 않습니다.</small></p>
-<section>{% for i in range(3) %}<article><h3>cam{{i+1}} 대응점 <span id="count{{i}}">0/4</span></h3><canvas id="points{{i}}" tabindex="0" aria-label="cam{{i+1}} 대응점 선택. 방향키로 픽셀 이동, Enter로 선택" width="640" height="480" style="width:100%;cursor:crosshair;background:#111"></canvas><button onclick="undoPoint({{i}})">마지막 점 취소</button><button onclick="clearPoints({{i}})">점 초기화</button></article>{% endfor %}</section>
-<p><small>영상 위에서 마우스를 움직이면 커서 주변이 8배 확대됩니다. 십자선 중앙이 선택할 픽셀입니다. 클릭으로 선택하거나, 영상을 클릭해 포커스를 둔 뒤 방향키로 1픽셀씩 이동하고 Enter로 다음 점을 선택할 수 있습니다.</small></p>
+<section>{% for i in range(3) %}<article><h3>cam{{i+1}} 대응점 <span id="count{{i}}">0/4</span></h3><canvas id="points{{i}}" tabindex="0" aria-label="cam{{i+1}} 대응점 선택. 방향키로 픽셀 이동, Enter로 선택" width="640" height="480" style="width:100%;cursor:crosshair;background:#111"></canvas><button onclick="startKeyboard({{i}})">키보드 선택 시작</button><button onclick="undoPoint({{i}})">마지막 점 취소</button><button onclick="clearPoints({{i}})">점 초기화</button></article>{% endfor %}</section>
+<p><small>영상 위에서 마우스를 움직이면 커서 주변이 8배 확대됩니다. 십자선 중앙이 선택할 픽셀입니다. 마우스로 대략적인 위치를 잡은 뒤 방향키로 1픽셀씩 이동하고 Enter로 점을 저장하세요. 클릭하지 않아도 됩니다. 또는 각 영상의 키보드 선택 시작 버튼을 누르세요.</small></p>
 <div id="pixelLoupe" hidden aria-hidden="true"><canvas id="pixelLoupeCanvas" width="224" height="224"></canvas><div id="pixelLoupeLabel"></div></div>
 <p id="pointStatus" role="status"></p>
 <p>추가 미세 조정 — 원근 보정 후 회전·배율·이동을 적용합니다:</p>{% for i in range(3) %}<p>cam{{i+1}} X <input id="x{{i}}" type="number" value="0" min="-640" max="640"> Y <input id="y{{i}}" type="number" value="0" min="-640" max="640"> 회전(도) <input id="angle{{i}}" type="number" value="0" min="-180" max="180" step="0.1"> 배율 <input id="scale{{i}}" type="number" value="1" min="0.2" max="5" step="0.001"></p>{% endfor %}
@@ -57,8 +57,16 @@ function showLoupe(){
  box.style.left=Math.max(8,Math.min(left,window.innerWidth-w-8))+'px';
  box.style.top=Math.max(8,Math.min(top,window.innerHeight-h-8))+'px';
 }
-function selectPixel(){if(!pixelCursor)return;const {i,x,y}=pixelCursor;if(!rawImages[i]||points[i].length>=4)return;points[i].push([x,y]);drawPoints(i);queuePreview();}
+function startKeyboard(i){
+ if(!rawImages[i]){el('pointStatus').textContent='원본 영상 로딩 후 키보드 선택을 시작하세요.';return;}
+ if(!pixelCursor||pixelCursor.i!==i){const r=el('points'+i).getBoundingClientRect();pixelCursor={i,x:320,y:240,clientX:r.left+r.width/2,clientY:r.top+r.height/2};}
+ el('points'+i).focus({preventScroll:true});showLoupe();
+ el('pointStatus').textContent=`cam${i+1}: 방향키로 1픽셀 이동 · Enter로 점 저장 · Esc로 돋보기 닫기`;
+}
+function selectPixel(){if(!pixelCursor)return;const {i,x,y}=pixelCursor;if(!rawImages[i]||points[i].length>=4)return;points[i].push([x,y]);drawPoints(i);el('pointStatus').textContent=`cam${i+1} 점 ${points[i].length}/4 저장: X=${x}, Y=${y}`+(points[i].length===4?' — 다음 카메라를 선택하세요.':' — 마우스 또는 방향키로 다음 위치를 지정하세요.');queuePreview();}
 [0,1,2].forEach(i=>{const c=el('points'+i);
+ c.addEventListener('pointerenter',e=>{if(!rawImages[i])return;pixelCursor=cursorAt(i,e);startKeyboard(i);});
+ c.addEventListener('focus',()=>{if(rawImages[i]){if(!pixelCursor||pixelCursor.i!==i){const r=c.getBoundingClientRect();pixelCursor={i,x:320,y:240,clientX:r.left+r.width/2,clientY:r.top+r.height/2};}showLoupe();}});
  c.addEventListener('pointermove',e=>{pixelCursor=cursorAt(i,e);showLoupe();});
  c.addEventListener('pointerleave',hideLoupe);
  c.addEventListener('blur',hideLoupe);
