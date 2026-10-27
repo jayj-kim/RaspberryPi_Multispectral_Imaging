@@ -131,12 +131,62 @@ class Rig:
         self.finish()
 
 
-def compose(folder, mapping, offsets):
+def registration_matrices(points=None, adjustments=None):
+    """Map each original camera image into cam1 coordinates, then fine-tune."""
+    points = points if points is not None else [[], [], []]
+    adjustments = adjustments if adjustments is not None else [[0, 1]] * 3
+    if len(points) != 3 or len(adjustments) != 3:
+        raise ValueError('카메라 3대의 보정값이 필요합니다')
+    arrays = []
+    for group in points:
+        a = np.asarray(group, dtype=np.float64)
+        if a.size == 0:
+            arrays.append(None)
+            continue
+        if a.shape != (4, 2) or not np.isfinite(a).all() or (a < 0).any() or (a[:, 0] >= 640).any() or (a[:, 1] >= 480).any():
+            raise ValueError('각 영상에서 대응점 4개를 선택하세요')
+        # Every three points must span an area: reject duplicates and near-collinear sets.
+        for omit in range(4):
+            tri = np.delete(a, omit, axis=0)
+            u, v = tri[1] - tri[0], tri[2] - tri[0]
+            if abs(u[0]*v[1] - u[1]*v[0]) < 20:
+                raise ValueError('점은 일직선을 피하고 영상 전체에 넓게 선택하세요')
+        arrays.append(a)
+    result = []
+    for i in range(3):
+        h = np.eye(3)
+        if i and arrays[i] is not None:
+            if arrays[0] is None:
+                raise ValueError('기준 cam1의 대응점 4개가 필요합니다')
+            h = cv2.getPerspectiveTransform(arrays[i].astype(np.float32), arrays[0].astype(np.float32))
+            if not np.isfinite(h).all() or abs(np.linalg.det(h)) < 1e-10 or np.linalg.cond(h) > 1e9:
+                raise ValueError('불안정한 대응점입니다. 점 순서와 위치를 확인하세요')
+            corners = np.float32([[0,0], [639,0], [639,479], [0,479]])
+            denominators = (h @ np.c_[corners, np.ones(4)].T)[2]
+            if np.min(denominators) <= 0 <= np.max(denominators):
+                raise ValueError('영상 내부에서 변환이 뒤집힙니다. 점 순서를 확인하세요')
+        pair = np.asarray(adjustments[i], dtype=float)
+        if pair.shape != (2,) or not np.isfinite(pair).all() or abs(pair[0]) > 180 or not .2 <= pair[1] <= 5:
+            raise ValueError('회전은 ±180도, 배율은 0.2~5 범위입니다')
+        fine = np.eye(3)
+        fine[:2] = cv2.getRotationMatrix2D((320, 240), float(pair[0]), float(pair[1]))
+        result.append(fine @ h)
+    return result
+
+
+def warp_channel(gray, matrix, offset):
+    dx, dy = offset
+    translation = np.float64([[1, 0, dx], [0, 1, dy], [0, 0, 1]])
+    return cv2.warpPerspective(gray, translation @ matrix, (640, 480))
+
+
+def compose(folder, mapping, offsets, points=None, adjustments=None):
     """Nearest host timestamp matching; cam1 defines output timeline."""
     if sorted(mapping) != [0, 1, 2]:
         raise ValueError('RGB 채널에 서로 다른 카메라를 선택하세요')
     if len(offsets) != 3 or any(len(x) != 2 or not all(np.isfinite(v) and abs(v) <= 640 for v in x) for x in offsets):
         raise ValueError('이동값은 -640~640 범위의 숫자여야 합니다')
+    matrices = registration_matrices(points, adjustments)
     times = []
     caps = []
     writer = None
@@ -169,10 +219,9 @@ def compose(folder, mapping, offsets):
                     if not ok: raise ValueError('프레임 기록과 영상 길이가 다릅니다')
                     positions[i] += 1
                 g = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY)
-                dx, dy = offsets[i]
-                gray.append(cv2.warpAffine(g, np.float32([[1, 0, dx], [0, 1, dy]]), (640, 480)))
+                gray.append(warp_channel(g, matrices[i], offsets[i]))
             writer.write(cv2.merge([gray[mapping[2]], gray[mapping[1]], gray[mapping[0]]]))
-        (folder / 'alignment.json').write_text(json.dumps({'rgb_cameras': mapping, 'xy_offsets': offsets}, indent=2))
+        (folder / 'alignment.json').write_text(json.dumps({'rgb_cameras': mapping, 'xy_offsets': offsets, 'points': points, 'adjustments': adjustments}, indent=2))
         return {'file': str(destination), 'frames': len(targets), 'fps': round(fps, 2)}
     finally:
         for cap in caps: cap.release()
@@ -232,7 +281,7 @@ def create_app(rig):
                 with rig.lock:
                     if rig.recording: raise ValueError('녹화를 중지한 후 합성하세요')
                 if not (folder / 'session.json').is_file(): raise ValueError('완료된 세션이 아닙니다')
-                return jsonify(compose(folder, body['mapping'], body['offsets']))
+                return jsonify(compose(folder, body['mapping'], body['offsets'], body.get('points'), body.get('adjustments')))
             return jsonify(error='알 수 없는 작업'), 404
         except (ValueError, RuntimeError, KeyError, TypeError, OSError) as exc:
             return jsonify(error=str(exc)), 400
@@ -249,12 +298,19 @@ def create_app(rig):
             folder = (rig.output / name).resolve()
             if folder.parent != rig.output.resolve() or not (folder / 'session.json').is_file():
                 raise ValueError('완료된 세션이 아닙니다')
+            if body.get('load_profile'):
+                profile = folder / 'alignment.json'
+                return jsonify(json.loads(profile.read_text()) if profile.is_file() else {})
             mapping = body['mapping']
             offsets = body['offsets']
             if sorted(mapping) != [0, 1, 2]:
                 raise ValueError('RGB 채널에 서로 다른 카메라를 선택하세요')
             if len(offsets) != 3 or any(len(x) != 2 or not all(np.isfinite(v) and abs(v) <= 640 for v in x) for x in offsets):
                 raise ValueError('이동값 범위를 확인하세요')
+            matrices = registration_matrices(body.get('points'), body.get('adjustments'))
+            raw = body.get('raw')
+            if raw is not None and (type(raw) is not int or raw not in range(3)):
+                raise ValueError('잘못된 카메라 번호')
             fraction = float(body.get('position', 0.5))
             if not np.isfinite(fraction) or not 0 <= fraction <= 1:
                 raise ValueError('잘못된 재생 위치')
@@ -281,10 +337,9 @@ def create_app(rig):
                 finally:
                     cap.release()
                 g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                dx, dy = offsets[i]
-                gray.append(cv2.warpAffine(g, np.float32([[1, 0, dx], [0, 1, dy]]), (640, 480)))
+                gray.append(g if raw is not None else warp_channel(g, matrices[i], offsets[i]))
             merged = cv2.merge([gray[mapping[2]], gray[mapping[1]], gray[mapping[0]]])
-            ok, encoded = cv2.imencode('.jpg', merged, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            ok, encoded = cv2.imencode('.jpg', merged if raw is None else gray[raw], [cv2.IMWRITE_JPEG_QUALITY, 90])
             if not ok:
                 raise RuntimeError('미리보기 인코딩 실패')
             return Response(encoded.tobytes(), mimetype='image/jpeg', headers={'Cache-Control': 'no-store'})
