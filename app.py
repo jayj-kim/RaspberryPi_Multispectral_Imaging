@@ -394,6 +394,65 @@ class TemporalRegistration:
         return self.last, 'smoothed' if changed else 'held_small'
 
 
+class LocalRefinement:
+    """Dense cross-view residual flow; confidence is a consistency check, not ground truth."""
+    def __init__(self):
+        if not hasattr(cv2,'DISOpticalFlow_create'):
+            raise ValueError('이 OpenCV는 DIS 광학 흐름을 지원하지 않습니다')
+        self.engine=cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
+        self.clahe=cv2.createCLAHE(clipLimit=2,tileGridSize=(8,8))
+        y,x=np.indices((480,640),dtype=np.float32)
+        self.grid=np.dstack([x,y])
+
+    def refine(self,channels):
+        ref=self.clahe.apply(channels[0])
+        output=[channels[0]]
+        masks=[]
+        reports=[]
+        for i in (1,2):
+            source=self.clahe.apply(channels[i])
+            flow=self.engine.calc(ref,source,None)
+            back=self.engine.calc(source,ref,None)
+            coords=self.grid+flow
+            reverse=cv2.remap(back,coords,None,cv2.INTER_LINEAR,borderMode=cv2.BORDER_CONSTANT,borderValue=1000)
+            error=np.linalg.norm(flow+reverse,axis=2)
+            valid=np.isfinite(coords).all(axis=2)&(error<1.5)&(np.linalg.norm(flow,axis=2)<60)
+            valid&=(coords[:,:,0]>=0)&(coords[:,:,0]<639)&(coords[:,:,1]>=0)&(coords[:,:,1]<479)
+            mapped=cv2.remap(channels[i],coords,None,cv2.INTER_LINEAR)
+            valid&=(channels[0]>2)&(mapped>2)
+            # Bound extreme deformations; consistency failures within the bound remain approximate.
+            usable=np.isfinite(coords).all(axis=2)&(np.linalg.norm(flow,axis=2)<60)
+            output.append(np.where(usable,mapped,channels[i]).astype(np.uint8))
+            masks.append(valid)
+            reports.append({'camera':i+1,'consistent_fraction':float(valid.mean()),
+                'median_roundtrip_error_px':float(np.median(error)),
+                'median_residual_flow_px':float(np.median(np.linalg.norm(flow,axis=2)))})
+        return output,(masks[0]&masks[1]).astype(np.uint8)*255,reports
+
+
+class LocalArtifacts:
+    def __init__(self,folder,destination,fps):
+        self.refiner=LocalRefinement()
+        self.log=(folder/'local_registration.jsonl').open('w')
+        self.mask_path=destination.with_stem(destination.stem+'_validity')
+        self.writer=cv2.VideoWriter(str(self.mask_path),cv2.VideoWriter_fourcc(*'MJPG'),fps,(640,480))
+        if not self.writer.isOpened():
+            self.log.close()
+            self.writer.release()
+            raise RuntimeError('국소 정합 검사 영상 저장기 초기화 실패')
+
+    def apply(self,channels,number):
+        corrected,mask,reports=self.refiner.refine(channels)
+        self.writer.write(cv2.cvtColor(mask,cv2.COLOR_GRAY2BGR))
+        self.log.write(json.dumps({'frame':number,'consistent_fraction':float((mask>0).mean()),
+                                  'cameras':reports})+'\n')
+        return corrected
+
+    def close(self):
+        self.writer.release()
+        self.log.close()
+
+
 def smooth_registration_path(matrices, window):
     """Centered robust outlier removal + Gaussian filter, preserving cam1."""
     values=np.asarray(matrices,dtype=np.float64)
@@ -423,7 +482,7 @@ def smooth_registration_path(matrices, window):
     return output
 
 
-def render_smoothed(folder, destination, mapping, offsets, fps, times, targets, window, progress, counts):
+def render_smoothed(folder, destination, mapping, offsets, fps, times, targets, window, progress, counts, local_refinement=False):
     with (folder/'registration_dynamic.jsonl').open() as stream:
         records=[json.loads(line) for line in stream]
     if len(records)!=len(targets):
@@ -431,12 +490,14 @@ def render_smoothed(folder, destination, mapping, offsets, fps, times, targets, 
     matrices=smooth_registration_path([r['matrices'] for r in records],window)
     caps=[]
     writer=None
+    local=None
     try:
         for i in range(3):
             caps.append(cv2.VideoCapture(str(folder/f'cam{i+1}.avi')))
             if not caps[-1].isOpened():raise ValueError('평활화 원본 영상 열기 실패')
         writer=cv2.VideoWriter(str(destination),cv2.VideoWriter_fourcc(*'MJPG'),fps,(640,480))
         if not writer.isOpened():raise RuntimeError('평활화 영상 저장기 초기화 실패')
+        if local_refinement:local=LocalArtifacts(folder,destination,fps)
         positions=[-1]*3
         frames=[None]*3
         with (folder/'registration_smoothed.jsonl').open('w') as log:
@@ -450,6 +511,7 @@ def render_smoothed(folder, destination, mapping, offsets, fps, times, targets, 
                         positions[i]+=1
                     g=cv2.cvtColor(frames[i],cv2.COLOR_BGR2GRAY)
                     gray.append(warp_channel(g,matrices[n,i],offsets[i]))
+                if local:gray=local.apply(gray,n)
                 composite=cv2.merge([gray[mapping[2]],gray[mapping[1]],gray[mapping[0]]])
                 whole=records[n].get('global_stabilization')
                 if whole:
@@ -462,14 +524,21 @@ def render_smoothed(folder, destination, mapping, offsets, fps, times, targets, 
     finally:
         for cap in caps:cap.release()
         if writer is not None:writer.release()
+        if local is not None:local.close()
 
 
-def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=False, progress=None, stabilization='balanced', global_stabilization=False, registration_method='orb', temporal_window=0):
+def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=False, progress=None, stabilization='balanced', global_stabilization=False, registration_method='orb', temporal_window=0, local_refinement=False):
     """Nearest host timestamp matching; cam1 defines output timeline."""
     if sorted(mapping) != [0, 1, 2]:
         raise ValueError('RGB 채널에 서로 다른 카메라를 선택하세요')
     if len(offsets) != 3 or any(len(x) != 2 or not all(np.isfinite(v) and abs(v) <= 640 for v in x) for x in offsets):
         raise ValueError('이동값은 -640~640 범위의 숫자여야 합니다')
+    if type(local_refinement) is not bool:
+        raise ValueError('국소 정합 값은 참/거짓이어야 합니다')
+    if local_refinement and global_stabilization:
+        raise ValueError('국소 정합 검사 영상과 좌표를 맞추기 위해 전체 이동 보정은 꺼주세요')
+    if local_refinement and not dynamic:
+        raise ValueError('국소 정합은 프레임별 모드에서 사용하세요')
     if type(temporal_window) is not int or temporal_window not in (0,15,31,61):
         raise ValueError('시간축 평활화 창을 확인하세요')
     if registration_method not in ('orb', 'tracking'):
@@ -488,6 +557,7 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
     successful = 0
     fallback = 0
     log = None
+    local = None
     times = []
     caps = []
     writer = None
@@ -509,12 +579,14 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
             output_name += '_tracking'
         if global_stabilization:
             output_name += '_stabilized'
+        if local_refinement and not temporal_window:output_name+='_local'
         destination = folder / (output_name + '.avi')
         if dynamic:
             log = (folder / 'registration_dynamic.jsonl').open('w')
             (folder / 'registration_dynamic_summary.json').write_text(json.dumps({'completed': False}))
         writer = cv2.VideoWriter(str(destination), cv2.VideoWriter_fourcc(*'MJPG'), fps, (640, 480))
         if not writer.isOpened(): raise RuntimeError('합성 영상 저장기 초기화 실패')
+        if local_refinement and not temporal_window:local=LocalArtifacts(folder,destination,fps)
         positions = [-1]*3
         frames = [None]*3
         for number, stamp in enumerate(targets):
@@ -567,6 +639,7 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
             if progress:
                 progress({'running': True, 'phase': '정합 분석', 'done': number+1, 'total': len(targets),
                           'estimated': successful, 'fallback': fallback})
+            if local:gray=local.apply(gray,number)
             composite=cv2.merge([gray[mapping[2]], gray[mapping[1]], gray[mapping[0]]])
             if global_stabilization:
                 composite=cv2.warpAffine(composite,np.float32([[1,0,correction[0]],[0,1,correction[1]]]),(640,480))
@@ -575,13 +648,27 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
         if dynamic and temporal_window:
             log.flush()
             writer.release()
-            destination=destination.with_stem(destination.stem+'_smooth')
+            destination=destination.with_stem(destination.stem+'_smooth'+('_local' if local_refinement else ''))
             render_smoothed(folder,destination,mapping,offsets,fps,times,targets,temporal_window,progress,
-                            {'estimated':successful,'fallback':fallback})
-        (folder / 'alignment.json').write_text(json.dumps({'rgb_cameras': mapping, 'xy_offsets': offsets, 'points': points, 'adjustments': adjustments, 'dynamic': dynamic, 'stabilization': stabilization, 'global_stabilization': global_stabilization, 'registration_method': registration_method, 'temporal_window': temporal_window}, indent=2))
+                            {'estimated':successful,'fallback':fallback},local_refinement)
+        (folder / 'alignment.json').write_text(json.dumps({'rgb_cameras': mapping, 'xy_offsets': offsets, 'points': points, 'adjustments': adjustments, 'dynamic': dynamic, 'stabilization': stabilization, 'global_stabilization': global_stabilization, 'registration_method': registration_method, 'temporal_window': temporal_window, 'local_refinement': local_refinement}, indent=2))
         summary = {'file': str(destination), 'frames': len(targets), 'fps': round(fps, 2),
-                   'dynamic': dynamic, 'stabilization': stabilization, 'global_stabilization': global_stabilization, 'registration_method': registration_method, 'temporal_window': temporal_window, 'baseline_file': baseline_file, 'estimated': successful, 'fallback': fallback,
+                   'dynamic': dynamic, 'stabilization': stabilization, 'global_stabilization': global_stabilization, 'registration_method': registration_method, 'temporal_window': temporal_window, 'local_refinement': local_refinement, 'validity_file': str(destination.with_stem(destination.stem+'_validity')) if local_refinement else None, 'baseline_file': baseline_file, 'estimated': successful, 'fallback': fallback,
                    'warning': '자동 정합 성공 프레임이 없습니다. 초기 보정값만 사용했습니다.' if dynamic and not successful else None}
+        if local_refinement:
+            # Ensure diagnostics from the single-pass path are available before summarizing.
+            if local is not None:local.log.flush()
+            total_fraction=0.0
+            local_count=0
+            with (folder/'local_registration.jsonl').open() as stream:
+                for line in stream:
+                    total_fraction+=json.loads(line)['consistent_fraction']
+                    local_count+=1
+            fraction=total_fraction/max(1,local_count)
+            summary['local_consistent_fraction']=fraction
+            summary['local_warning']='검사에 통과하지 못한 영역도 근사 변형으로 포함됩니다. 검사 영상을 함께 확인하세요.'
+            if fraction<.5:
+                summary['local_warning']='일관성 검사 통과 영역이 절반 미만입니다. 자연스럽게 보이는 부분도 정확한 정합을 보장하지 않습니다.'
         if dynamic:
             (folder / 'registration_dynamic_summary.json').write_text(json.dumps({'completed': True, **summary}, indent=2))
         return summary
@@ -589,6 +676,7 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
         for cap in caps: cap.release()
         if writer is not None: writer.release()
         if log is not None: log.close()
+        if local is not None:local.close()
 
 
 def create_app(rig):
@@ -651,7 +739,7 @@ def create_app(rig):
                 update_progress({'running': True, 'done': 0, 'total': 0})
                 try:
                     return jsonify(compose(folder, body['mapping'], body['offsets'], body.get('points'),
-                        body.get('adjustments'), body.get('dynamic', False), update_progress, body.get('stabilization', 'balanced'), body.get('global_stabilization', False), body.get('registration_method', 'orb'), body.get('temporal_window', 0)))
+                        body.get('adjustments'), body.get('dynamic', False), update_progress, body.get('stabilization', 'balanced'), body.get('global_stabilization', False), body.get('registration_method', 'orb'), body.get('temporal_window', 0), body.get('local_refinement', False)))
                 except Exception as exc:
                     update_progress({**processing['snapshot'], 'error': str(exc)})
                     raise

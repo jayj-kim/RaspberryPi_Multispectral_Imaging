@@ -7,7 +7,7 @@ import csv
 import json
 import cv2
 import numpy as np
-from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration, TemporalRegistration, GlobalTranslationStabilizer, smooth_registration_path
+from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration, TemporalRegistration, GlobalTranslationStabilizer, smooth_registration_path, LocalRefinement
 
 
 class WorkflowTest(unittest.TestCase):
@@ -65,6 +65,23 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(response.status_code,200,response.json)
             self.assertEqual(len(response.json['reports']),2)
             self.assertFalse((folder/'alignment.json').exists())
+
+    def test_local_registration_two_depth_regions(self):
+        rng=np.random.default_rng(92)
+        reference=cv2.GaussianBlur(rng.integers(20,230,(480,640),dtype=np.uint8),(5,5),0)
+        y,x=np.indices(reference.shape,dtype=np.float32)
+        # Two independently shifted planes; a single translation cannot align both.
+        source=cv2.remap(reference,x+np.where(x<320,8,-6).astype(np.float32),y,cv2.INTER_LINEAR)
+        output,mask,reports=LocalRefinement().refine([reference,source,source])
+        region=np.zeros(reference.shape,bool)
+        region[40:440,40:280]=True;region[40:440,360:600]=True
+        before=np.mean(np.abs(reference[region].astype(float)-source[region]))
+        after=np.mean(np.abs(reference[region].astype(float)-output[1][region]))
+        self.assertLess(after,before*.2)
+        np.testing.assert_array_equal(output[0],reference)
+        self.assertGreater(float((mask[region]>0).mean()),.8)
+        _,invalid,_=LocalRefinement().refine([reference,np.zeros_like(reference),np.zeros_like(reference)])
+        self.assertFalse(invalid.any())
 
     def test_centered_registration_smoothing(self):
         values=np.tile(np.eye(3),(100,3,1,1))
@@ -198,6 +215,20 @@ class WorkflowTest(unittest.TestCase):
             cap=cv2.VideoCapture(stabilized.json['file'])
             self.assertTrue(cap.read()[0]);cap.release()
             self.assertTrue(json.loads((folder/'alignment.json').read_text())['global_stabilization'])
+            local=client.post('/api/compose',headers={'X-Rig-Request':'1'},json={
+                'session':'moving','mapping':[0,1,2],'offsets':[[0,0]]*3,'dynamic':True,
+                'temporal_window':15,'local_refinement':True})
+            self.assertEqual(local.status_code,200,local.json)
+            self.assertTrue(local.json['local_refinement'])
+            for file in (local.json['file'],local.json['validity_file']):
+                cap=cv2.VideoCapture(file)
+                count=0
+                while cap.read()[0]:count+=1
+                cap.release()
+                self.assertEqual(count,6)
+            diagnostics=[json.loads(line) for line in (folder/'local_registration.jsonl').read_text().splitlines()]
+            self.assertEqual(len(diagnostics),6)
+            self.assertIn('consistent_fraction',diagnostics[0])
 
     def test_record_and_compose(self):
         with tempfile.TemporaryDirectory() as temp:
