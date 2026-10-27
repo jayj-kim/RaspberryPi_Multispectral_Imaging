@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 import csv
 import cv2
+import numpy as np
 from app import Rig, create_app
 
 
@@ -34,6 +35,16 @@ class WorkflowTest(unittest.TestCase):
                     self.assertGreater(len(rows), 5)
                     self.assertTrue(all(int(b['monotonic_ns']) > int(a['monotonic_ns']) for a,b in zip(rows, rows[1:])))
                 payload = {'session': name, 'mapping': [0,1,2], 'offsets': [[0,0]]*3}
+                preview = client.post('/api/preview', headers=headers, json={**payload, 'position': .5})
+                self.assertEqual(preview.status_code, 200, preview.data[:100])
+                image = cv2.imdecode(np.frombuffer(preview.data, np.uint8), cv2.IMREAD_COLOR)
+                self.assertEqual(image.shape, (480, 640, 3))
+                moved = client.post('/api/preview', headers=headers, json={**payload, 'offsets': [[100, 0], [0, 0], [0, 0]]})
+                self.assertEqual(moved.status_code, 200)
+                shifted = cv2.imdecode(np.frombuffer(moved.data, np.uint8), cv2.IMREAD_COLOR)
+                self.assertGreater(int(image[400, 50, 2]), int(shifted[400, 50, 2]) + 10)
+                rejected = client.post('/api/preview', headers=headers, json={**payload, 'session': '../escape'})
+                self.assertEqual(rejected.status_code, 400)
                 bad = client.post('/api/compose', headers=headers, json={**payload, 'mapping': [0,0,2]})
                 self.assertEqual(bad.status_code, 400)
                 response = client.post('/api/compose', headers=headers, json=payload)

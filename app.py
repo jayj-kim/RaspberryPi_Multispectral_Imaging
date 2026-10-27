@@ -239,6 +239,58 @@ def create_app(rig):
         finally:
             job_lock.release()
 
+    @app.post('/api/preview')
+    def preview():
+        try:
+            body = request.get_json()
+            name = body['session']
+            if not isinstance(name, str) or Path(name).name != name or name in ('.', '..'):
+                raise ValueError('잘못된 세션 이름')
+            folder = (rig.output / name).resolve()
+            if folder.parent != rig.output.resolve() or not (folder / 'session.json').is_file():
+                raise ValueError('완료된 세션이 아닙니다')
+            mapping = body['mapping']
+            offsets = body['offsets']
+            if sorted(mapping) != [0, 1, 2]:
+                raise ValueError('RGB 채널에 서로 다른 카메라를 선택하세요')
+            if len(offsets) != 3 or any(len(x) != 2 or not all(np.isfinite(v) and abs(v) <= 640 for v in x) for x in offsets):
+                raise ValueError('이동값 범위를 확인하세요')
+            fraction = float(body.get('position', 0.5))
+            if not np.isfinite(fraction) or not 0 <= fraction <= 1:
+                raise ValueError('잘못된 재생 위치')
+            times = []
+            for i in range(3):
+                with (folder / f'cam{i+1}.csv').open() as f:
+                    times.append(np.array([int(r['monotonic_ns']) for r in csv.DictReader(f)], dtype=np.int64))
+                if len(times[-1]) == 0:
+                    raise ValueError('빈 영상입니다')
+            start = max(t[0] for t in times)
+            end = min(t[-1] for t in times)
+            if end < start:
+                raise ValueError('공통 촬영 구간이 없습니다')
+            stamp = start + int((end - start) * fraction)
+            gray = []
+            for i in range(3):
+                idx = int(np.argmin(np.abs(times[i] - stamp)))
+                cap = cv2.VideoCapture(str(folder / f'cam{i+1}.avi'))
+                try:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                    ok, frame = cap.read()
+                    if not ok:
+                        raise ValueError('영상 프레임 읽기 실패')
+                finally:
+                    cap.release()
+                g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                dx, dy = offsets[i]
+                gray.append(cv2.warpAffine(g, np.float32([[1, 0, dx], [0, 1, dy]]), (640, 480)))
+            merged = cv2.merge([gray[mapping[2]], gray[mapping[1]], gray[mapping[0]]])
+            ok, encoded = cv2.imencode('.jpg', merged, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            if not ok:
+                raise RuntimeError('미리보기 인코딩 실패')
+            return Response(encoded.tobytes(), mimetype='image/jpeg', headers={'Cache-Control': 'no-store'})
+        except (ValueError, RuntimeError, KeyError, TypeError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
+
     @app.get('/api/sessions')
     def sessions():
         return jsonify(sorted([p.parent.name for p in rig.output.glob('*/session.json')], reverse=True))
