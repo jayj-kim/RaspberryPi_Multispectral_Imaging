@@ -263,3 +263,16 @@ DEMO는 가상 영상입니다. 실제 카메라 성능을 검증하지 않습�
 
 설계 참고: https://github.com/Project-326/True-Color-NIR-Camera
 이 구현은 별도로 작성했으며 원본 소스를 복사하지 않았습니다.
+
+## 비교 영상을 라즈베리파이에서 만들기
+
+국소 정합 결과를 저장한 뒤 프로젝트 폴더에서 실행합니다.
+
+```bash
+python make_comparison.py
+```
+
+최근 국소 정합 세션을 찾아 `comparison.avi`를 생성합니다.
+세션을 직접 지정하려면 `python make_comparison.py --session captures/세션이름`을 사용하세요.
+VLC로 열면 왼쪽부터 전역 정합, 국소 정합, 일관성 검사(있는 경우)를 볼 수 있습니다.
+원본은 외부로 전송하지 않습니다. 기존 comparison.avi는 덮어쓰지 않습니다.
