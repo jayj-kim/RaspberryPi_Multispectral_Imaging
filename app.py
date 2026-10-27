@@ -174,61 +174,161 @@ def registration_matrices(points=None, adjustments=None):
     return result
 
 
-def automatic_registration(frames):
-    """Estimate two static homographies at the selected timestamp; fail atomically."""
-    detector = cv2.ORB_create(nfeatures=3000, fastThreshold=12)
-    reference_keys, reference_desc = detector.detectAndCompute(frames[0], None)
-    if reference_desc is None or len(reference_keys) < 25:
-        raise ValueError('cam1 특징점이 부족합니다. 밝고 선명하며 무늬가 많은 장면을 선택하세요')
-    estimates, reports = [], []
-    for i in (1, 2):
-        keys, desc = detector.detectAndCompute(frames[i], None)
-        if desc is None or len(keys) < 25:
-            raise ValueError(f'cam{i+1} 특징점이 부족합니다')
-        pairs = cv2.BFMatcher(cv2.NORM_HAMMING).knnMatch(desc, reference_desc, k=2)
-        good = [pair[0] for pair in pairs if len(pair) == 2 and pair[0].distance < .75 * pair[1].distance]
-        # Keep only the best source for each reference feature.
-        unique = {}
-        for match in sorted(good, key=lambda m: m.distance):
-            unique.setdefault(match.trainIdx, match)
-        good = list(unique.values())
-        if len(good) < 20:
-            raise ValueError(f'cam{i+1}: 유효 대응점 {len(good)}개로 부족합니다 (최소 20개)')
-        source = np.float32([keys[m.queryIdx].pt for m in good])
-        target = np.float32([reference_keys[m.trainIdx].pt for m in good])
-        h, mask = cv2.findHomography(source, target, cv2.RANSAC, 3.0)
-        if h is None or mask is None:
-            raise ValueError(f'cam{i+1}: 원근 변환 계산 실패')
-        selected = mask.ravel().astype(bool)
-        count = int(selected.sum())
-        ratio = count / len(good)
-        if count < 15 or ratio < .45:
-            raise ValueError(f'cam{i+1}: 정합 신뢰도 부족 ({count}/{len(good)} 대응점)')
-        projected = cv2.perspectiveTransform(source[selected, None, :], h)[:, 0]
-        error = float(np.median(np.linalg.norm(projected - target[selected], axis=1)))
-        coverage = min(cv2.contourArea(cv2.convexHull(a[selected])) for a in (source, target)) / (640*480)
-        if not np.isfinite(h).all() or not np.isfinite(error) or error > 2.5 or coverage < .03:
-            raise ValueError(f'cam{i+1}: 오차가 크거나 특징점이 좁은 영역에 몰려 있습니다')
-        estimates.append(h)
-        reports.append({'camera': i+1, 'matches': len(good), 'inliers': count,
-                        'inlier_ratio': round(ratio, 3), 'median_error_px': round(error, 3),
-                        'coverage_percent': round(coverage*100, 1)})
-    # Encode homographies as compatible four-point controls, shared in cam1 coordinates.
-    # Find a broad reference rectangle whose inverse projections lie inside both sources.
+def fit_correspondences(source, target, camera):
+    if len(source) < 20:
+        raise ValueError(f'cam{camera}: 유효 대응점 {len(source)}개로 부족합니다')
+    h, mask = cv2.findHomography(source, target, cv2.RANSAC, 3.0)
+    if h is None or mask is None:
+        raise ValueError(f'cam{camera}: 원근 변환 계산 실패')
+    selected = mask.ravel().astype(bool)
+    count = int(selected.sum())
+    ratio = count / len(source)
+    if count < 15 or ratio < .45:
+        raise ValueError(f'cam{camera}: 정합 신뢰도 부족 ({count}/{len(source)})')
+    projected = cv2.perspectiveTransform(source[selected, None, :], h)[:, 0]
+    error = float(np.median(np.linalg.norm(projected - target[selected], axis=1)))
+    coverage = min(cv2.contourArea(cv2.convexHull(a[selected])) for a in (source, target)) / (640*480)
+    if not np.isfinite(h).all() or not np.isfinite(error) or error > 2.5 or coverage < .03:
+        raise ValueError(f'cam{camera}: 오차가 크거나 특징점이 좁은 영역에 몰려 있습니다')
+    report = {'camera': camera, 'matches': len(source), 'inliers': count,
+              'inlier_ratio': round(ratio,3), 'median_error_px': round(error,3),
+              'coverage_percent': round(coverage*100,1)}
+    return h, report, (source[selected], target[selected])
+
+
+def encode_registration(estimates, reports):
     for margin in (60, 90, 120, 150):
         reference = np.float32([[margin,margin],[639-margin,margin],
                                 [639-margin,479-margin],[margin,479-margin]])
         controls = [reference.tolist()]
         try:
             for h in estimates:
-                source = cv2.perspectiveTransform(reference[None], np.linalg.inv(h))[0]
-                controls.append(source.tolist())
+                controls.append(cv2.perspectiveTransform(reference[None], np.linalg.inv(h))[0].tolist())
             registration_matrices(controls)
         except (ValueError, np.linalg.LinAlgError):
             continue
         return {'points': controls, 'reports': reports,
-                'note': '선택한 한 시점의 고정 변환입니다. 이동 영상 전체의 프레임별 자동 정합은 아닙니다.'}
-    raise ValueError('세 영상의 안전한 공통 정합 영역이 부족합니다. 수동 정합으로 확인하세요')
+                'note': '선택한 한 시점의 변환입니다.'}
+    raise ValueError('세 영상의 안전한 공통 정합 영역이 부족합니다')
+
+
+def automatic_registration(frames, include_tracks=False):
+    detector = cv2.ORB_create(nfeatures=3000, fastThreshold=12)
+    reference_keys, reference_desc = detector.detectAndCompute(frames[0], None)
+    if reference_desc is None or len(reference_keys) < 25:
+        raise ValueError('cam1 특징점이 부족합니다. 밝고 선명하며 무늬가 많은 장면을 선택하세요')
+    estimates, reports, tracks = [], [], []
+    for i in (1,2):
+        keys, desc = detector.detectAndCompute(frames[i], None)
+        if desc is None or len(keys) < 25:
+            raise ValueError(f'cam{i+1} 특징점이 부족합니다')
+        pairs = cv2.BFMatcher(cv2.NORM_HAMMING).knnMatch(desc, reference_desc, k=2)
+        good = [p[0] for p in pairs if len(p)==2 and p[0].distance < .75*p[1].distance]
+        unique = {}
+        for match in sorted(good, key=lambda m:m.distance):
+            unique.setdefault(match.trainIdx,match)
+        good = list(unique.values())
+        source = np.float32([keys[m.queryIdx].pt for m in good]).reshape(-1,2)
+        target = np.float32([reference_keys[m.trainIdx].pt for m in good]).reshape(-1,2)
+        h, report, matched = fit_correspondences(source,target,i+1)
+        estimates.append(h); reports.append(report); tracks.append(matched)
+    result = encode_registration(estimates,reports)
+    if include_tracks:
+        result['tracks'] = tracks
+    return result
+
+
+def track_points(previous, current, points):
+    points = np.asarray(points,np.float32).reshape(-1,1,2)
+    moved, forward, _ = cv2.calcOpticalFlowPyrLK(previous,current,points,None,winSize=(21,21),maxLevel=3)
+    if moved is None:
+        raise ValueError('특징점 추적 실패')
+    back, backward, _ = cv2.calcOpticalFlowPyrLK(current,previous,moved,None,winSize=(21,21),maxLevel=3)
+    if back is None:
+        raise ValueError('역방향 추적 실패')
+    valid = (forward.ravel()==1)&(backward.ravel()==1)&(np.linalg.norm(back-points,axis=2).ravel()<1)
+    xy=moved[:,0]
+    valid &= np.isfinite(xy).all(axis=1)&(xy[:,0]>=0)&(xy[:,0]<640)&(xy[:,1]>=0)&(xy[:,1]<480)
+    return xy, valid
+
+
+class FlowRegistration:
+    """Track cross-camera inliers through time; redetect on loss or every 30 frames."""
+    def __init__(self):
+        self.previous=None
+        self.tracks=None
+        self.age=0
+
+    def estimate(self,frames):
+        result=None
+        if self.previous is not None and self.tracks is not None and self.age<30:
+            try:
+                estimates,reports,tracks=[],[],[]
+                for j,i in enumerate((1,2)):
+                    source,target=self.tracks[j]
+                    a,valid_a=track_points(self.previous[i],frames[i],source)
+                    b,valid_b=track_points(self.previous[0],frames[0],target)
+                    valid=valid_a&valid_b
+                    h,report,matched=fit_correspondences(a[valid],b[valid],i+1)
+                    estimates.append(h);reports.append(report);tracks.append(matched)
+                result=encode_registration(estimates,reports)
+                result['tracks']=tracks
+                result['method']='optical_flow'
+                self.age+=1
+            except (ValueError,cv2.error,np.linalg.LinAlgError):
+                result=None
+        if result is None:
+            # Do not keep tracks after an unsuccessful reacquisition.
+            self.tracks=None
+            self.previous=None
+            result=automatic_registration(frames,include_tracks=True)
+            result['method']='orb_reacquire'
+            self.age=0
+        self.previous=[frame.copy() for frame in frames]
+        self.tracks=result.pop('tracks')
+        return result
+
+
+class GlobalTranslationStabilizer:
+    """Reduce whole-frame translation jitter from cam1; one correction for all channels."""
+    def __init__(self):
+        self.previous=None
+        self.path=np.zeros(2)
+        self.smooth=np.zeros(2)
+        self.correction=np.zeros(2)
+
+    def update(self,frame):
+        state='initialized'
+        reason=None
+        if self.previous is not None:
+            try:
+                points=cv2.goodFeaturesToTrack(self.previous,300,.01,12)
+                if points is None or len(points)<20:
+                    raise ValueError('전체 안정화 특징점 부족')
+                moved,valid=track_points(self.previous,frame,points)
+                if valid.sum()<20:
+                    raise ValueError('전체 안정화 추적점 부족')
+                source=points[:,0][valid]
+                target=moved[valid]
+                # RANSAC translation estimate: suppress independently moving objects.
+                affine,mask=cv2.estimateAffinePartial2D(source,target,method=cv2.RANSAC,ransacReprojThreshold=2)
+                if affine is None or mask is None or mask.sum()<20 or mask.mean()<.5:
+                    raise ValueError('전체 안정화 움직임 추정 실패')
+                selected=mask.ravel().astype(bool)
+                if cv2.contourArea(cv2.convexHull(source[selected]))/(640*480)<.08:
+                    raise ValueError('전체 안정화 특징점 분포 부족')
+                # Translation-only compensation. Rotation, zoom and depth effects remain.
+                delta=np.median((target-source)[selected],axis=0)
+                if not np.isfinite(delta).all() or np.linalg.norm(delta)>40:
+                    raise ValueError('전체 안정화 급격한 움직임')
+                self.path+=delta
+                self.smooth=.12*self.path+.88*self.smooth
+                self.correction=np.clip(self.smooth-self.path,-50,50)
+                state='stabilized'
+            except (ValueError,cv2.error) as exc:
+                state,reason='held',str(exc)
+        self.previous=frame.copy()
+        return self.correction.copy(), {'state':state,'reason':reason,'translation_px':self.correction.tolist()}
 
 
 def warp_channel(gray, matrix, offset):
@@ -294,17 +394,23 @@ class TemporalRegistration:
         return self.last, 'smoothed' if changed else 'held_small'
 
 
-def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=False, progress=None, stabilization='balanced'):
+def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=False, progress=None, stabilization='balanced', global_stabilization=False):
     """Nearest host timestamp matching; cam1 defines output timeline."""
     if sorted(mapping) != [0, 1, 2]:
         raise ValueError('RGB 채널에 서로 다른 카메라를 선택하세요')
     if len(offsets) != 3 or any(len(x) != 2 or not all(np.isfinite(v) and abs(v) <= 640 for v in x) for x in offsets):
         raise ValueError('이동값은 -640~640 범위의 숫자여야 합니다')
+    if type(global_stabilization) is not bool:
+        raise ValueError('전체 안정화 값은 참/거짓이어야 합니다')
+    if global_stabilization and not dynamic:
+        raise ValueError('전체 안정화는 프레임별 정합 모드에서 사용하세요')
     if type(dynamic) is not bool:
         raise ValueError('dynamic 값은 참/거짓이어야 합니다')
     matrices = registration_matrices(points, adjustments)
     last_valid = matrices
     temporal = TemporalRegistration(matrices, stabilization)
+    tracker = FlowRegistration()
+    whole_frame = GlobalTranslationStabilizer()
     successful = 0
     fallback = 0
     log = None
@@ -324,7 +430,7 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
         targets = times[0][(times[0] >= begin) & (times[0] <= end)]
         if len(targets) < 2: raise ValueError('세 영상의 공통 촬영 구간이 부족합니다')
         fps = float(1e9 / np.median(np.diff(targets)))
-        destination = folder / ('composite_dynamic.avi' if dynamic else 'composite.avi')
+        destination = folder / ('composite_dynamic_stabilized.avi' if global_stabilization else 'composite_dynamic.avi' if dynamic else 'composite.avi')
         if dynamic:
             log = (folder / 'registration_dynamic.jsonl').open('w')
             (folder / 'registration_dynamic_summary.json').write_text(json.dumps({'completed': False}))
@@ -347,9 +453,15 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
                 gray.append(cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY))
             state, reason, quality = 'static', None, []
             filter_state = None
+            method = None
+            correction = np.zeros(2)
+            global_report = None
+            if global_stabilization:
+                correction, global_report = whole_frame.update(gray[0])
             if dynamic:
                 try:
-                    result = automatic_registration(gray)
+                    result = tracker.estimate(gray)
+                    method = result['method']
                     candidate = registration_matrices(result['points'], adjustments)
                     last_valid, filter_state = temporal.update(candidate)
                     quality = result['reports']
@@ -367,15 +479,18 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
                 matrices = last_valid
                 log.write(json.dumps({'frame': number, 'monotonic_ns': int(stamp),
                     'source_monotonic_ns': source_stamps, 'state': state, 'reason': reason,
-                    'filter_state': filter_state, 'quality': quality, 'matrices': [h.tolist() for h in matrices]}) + '\n')
+                    'method': method, 'global_stabilization': global_report, 'filter_state': filter_state, 'quality': quality, 'matrices': [h.tolist() for h in matrices]}) + '\n')
             gray = [warp_channel(g, matrices[i], offsets[i]) for i, g in enumerate(gray)]
             if progress:
                 progress({'running': True, 'done': number+1, 'total': len(targets),
                           'estimated': successful, 'fallback': fallback})
-            writer.write(cv2.merge([gray[mapping[2]], gray[mapping[1]], gray[mapping[0]]]))
-        (folder / 'alignment.json').write_text(json.dumps({'rgb_cameras': mapping, 'xy_offsets': offsets, 'points': points, 'adjustments': adjustments, 'dynamic': dynamic, 'stabilization': stabilization}, indent=2))
+            composite=cv2.merge([gray[mapping[2]], gray[mapping[1]], gray[mapping[0]]])
+            if global_stabilization:
+                composite=cv2.warpAffine(composite,np.float32([[1,0,correction[0]],[0,1,correction[1]]]),(640,480))
+            writer.write(composite)
+        (folder / 'alignment.json').write_text(json.dumps({'rgb_cameras': mapping, 'xy_offsets': offsets, 'points': points, 'adjustments': adjustments, 'dynamic': dynamic, 'stabilization': stabilization, 'global_stabilization': global_stabilization}, indent=2))
         summary = {'file': str(destination), 'frames': len(targets), 'fps': round(fps, 2),
-                   'dynamic': dynamic, 'stabilization': stabilization, 'estimated': successful, 'fallback': fallback,
+                   'dynamic': dynamic, 'stabilization': stabilization, 'global_stabilization': global_stabilization, 'estimated': successful, 'fallback': fallback,
                    'warning': '자동 정합 성공 프레임이 없습니다. 초기 보정값만 사용했습니다.' if dynamic and not successful else None}
         if dynamic:
             (folder / 'registration_dynamic_summary.json').write_text(json.dumps({'completed': True, **summary}, indent=2))
@@ -446,7 +561,7 @@ def create_app(rig):
                 update_progress({'running': True, 'done': 0, 'total': 0})
                 try:
                     return jsonify(compose(folder, body['mapping'], body['offsets'], body.get('points'),
-                        body.get('adjustments'), body.get('dynamic', False), update_progress, body.get('stabilization', 'balanced')))
+                        body.get('adjustments'), body.get('dynamic', False), update_progress, body.get('stabilization', 'balanced'), body.get('global_stabilization', False)))
                 except Exception as exc:
                     update_progress({**processing['snapshot'], 'error': str(exc)})
                     raise

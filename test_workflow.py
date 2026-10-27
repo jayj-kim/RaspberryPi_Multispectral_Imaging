@@ -7,7 +7,7 @@ import csv
 import json
 import cv2
 import numpy as np
-from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration, TemporalRegistration
+from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration, TemporalRegistration, GlobalTranslationStabilizer
 
 
 class WorkflowTest(unittest.TestCase):
@@ -65,6 +65,22 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(response.status_code,200,response.json)
             self.assertEqual(len(response.json['reports']),2)
             self.assertFalse((folder/'alignment.json').exists())
+
+    def test_whole_frame_translation_stability(self):
+        rng=np.random.default_rng(12)
+        texture=cv2.GaussianBlur(rng.integers(0,256,(480,640),dtype=np.uint8),(3,3),0)
+        stabilizer=GlobalTranslationStabilizer()
+        before,after=[],[]
+        for n in range(30):
+            dx=3 if n%2 else -3
+            image=cv2.warpAffine(texture,np.float32([[1,0,dx],[0,1,0]]),(640,480))
+            correction,report=stabilizer.update(image)
+            before.append(dx);after.append(dx+correction[0])
+            if n:self.assertEqual(report['state'],'stabilized')
+        self.assertLess(np.std(after[5:]),np.std(before[5:])*.4)
+        correction,report=stabilizer.update(np.zeros_like(texture))
+        self.assertEqual(report['state'],'held')
+        self.assertTrue(np.isfinite(correction).all())
 
     def test_temporal_stability_and_motion(self):
         def matrices(dx):
@@ -127,6 +143,7 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(len(records),6)
             self.assertEqual(records[0]['state'],'fallback_initial')
             self.assertEqual(records[-1]['state'],'fallback_previous')
+            self.assertIn('optical_flow',[r['method'] for r in records])
             np.testing.assert_allclose(records[-1]['matrices'],records[-2]['matrices'])
             probes=np.float32([[[150,150],[320,240],[480,320]]])
             for n in range(1,5):
@@ -145,6 +162,15 @@ class WorkflowTest(unittest.TestCase):
             progress=client.get('/api/status').json['processing']
             self.assertFalse(progress['running'])
             self.assertEqual(progress['done'],6)
+            stabilized=client.post('/api/compose',headers={'X-Rig-Request':'1'},json={
+                'session':'moving','mapping':[0,1,2],'offsets':[[0,0]]*3,'dynamic':True,
+                'global_stabilization':True})
+            self.assertEqual(stabilized.status_code,200,stabilized.json)
+            self.assertTrue(stabilized.json['file'].endswith('composite_dynamic_stabilized.avi'))
+            self.assertTrue(Path(response.json['file']).is_file())
+            cap=cv2.VideoCapture(stabilized.json['file'])
+            self.assertTrue(cap.read()[0]);cap.release()
+            self.assertTrue(json.loads((folder/'alignment.json').read_text())['global_stabilization'])
 
     def test_record_and_compose(self):
         with tempfile.TemporaryDirectory() as temp:
