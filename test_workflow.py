@@ -7,7 +7,7 @@ import csv
 import json
 import cv2
 import numpy as np
-from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration, TemporalRegistration, GlobalTranslationStabilizer
+from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration, TemporalRegistration, GlobalTranslationStabilizer, smooth_registration_path
 
 
 class WorkflowTest(unittest.TestCase):
@@ -65,6 +65,23 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(response.status_code,200,response.json)
             self.assertEqual(len(response.json['reports']),2)
             self.assertFalse((folder/'alignment.json').exists())
+
+    def test_centered_registration_smoothing(self):
+        values=np.tile(np.eye(3),(100,3,1,1))
+        for n in range(100):
+            values[n,1,0,2]=n*.2+(2 if n%2 else -2)
+            values[n,2,1,2]=n*.1
+        values[50,1,0,2]+=20
+        output=smooth_registration_path(values,15)
+        np.testing.assert_allclose(output[:,0],values[:,0])
+        before=np.std(np.diff(values[:,1,0,2],n=2))
+        after=np.std(np.diff(output[:,1,0,2],n=2))
+        self.assertLess(after,before*.1)
+        # Centered filtering preserves a linear trajectory without causal lag away from boundaries.
+        np.testing.assert_allclose(output[20:80,2,1,2],values[20:80,2,1,2],atol=.001)
+        self.assertLess(abs(output[50,1,0,2]-10),1)
+        constant=np.tile(np.eye(3),(3,3,1,1))
+        np.testing.assert_allclose(smooth_registration_path(constant,31),constant,atol=.0001)
 
     def test_whole_frame_translation_stability(self):
         rng=np.random.default_rng(12)
@@ -164,10 +181,15 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(progress['done'],6)
             stabilized=client.post('/api/compose',headers={'X-Rig-Request':'1'},json={
                 'session':'moving','mapping':[0,1,2],'offsets':[[0,0]]*3,'dynamic':True,
-                'global_stabilization':True})
+                'global_stabilization':True,'temporal_window':15})
             self.assertEqual(stabilized.status_code,200,stabilized.json)
-            self.assertTrue(stabilized.json['file'].endswith('composite_dynamic_stabilized.avi'))
+            self.assertTrue(stabilized.json['file'].endswith('composite_dynamic_stabilized_smooth.avi'))
             self.assertTrue(Path(response.json['file']).is_file())
+            self.assertTrue(Path(stabilized.json['baseline_file']).is_file())
+            smooth_records=[json.loads(line) for line in (folder/'registration_smoothed.jsonl').read_text().splitlines()]
+            self.assertEqual(len(smooth_records),6)
+            self.assertIn('unsmoothed_matrices',smooth_records[0])
+            self.assertEqual(stabilized.json['temporal_window'],15)
             self.assertEqual(stabilized.json['registration_method'],'orb')
             default_records=[json.loads(line) for line in (folder/'registration_dynamic.jsonl').read_text().splitlines()]
             self.assertIn('orb',[r['method'] for r in default_records])
