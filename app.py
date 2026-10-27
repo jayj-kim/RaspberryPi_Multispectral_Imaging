@@ -174,6 +174,63 @@ def registration_matrices(points=None, adjustments=None):
     return result
 
 
+def automatic_registration(frames):
+    """Estimate two static homographies at the selected timestamp; fail atomically."""
+    detector = cv2.ORB_create(nfeatures=3000, fastThreshold=12)
+    reference_keys, reference_desc = detector.detectAndCompute(frames[0], None)
+    if reference_desc is None or len(reference_keys) < 25:
+        raise ValueError('cam1 특징점이 부족합니다. 밝고 선명하며 무늬가 많은 장면을 선택하세요')
+    estimates, reports = [], []
+    for i in (1, 2):
+        keys, desc = detector.detectAndCompute(frames[i], None)
+        if desc is None or len(keys) < 25:
+            raise ValueError(f'cam{i+1} 특징점이 부족합니다')
+        pairs = cv2.BFMatcher(cv2.NORM_HAMMING).knnMatch(desc, reference_desc, k=2)
+        good = [pair[0] for pair in pairs if len(pair) == 2 and pair[0].distance < .75 * pair[1].distance]
+        # Keep only the best source for each reference feature.
+        unique = {}
+        for match in sorted(good, key=lambda m: m.distance):
+            unique.setdefault(match.trainIdx, match)
+        good = list(unique.values())
+        if len(good) < 20:
+            raise ValueError(f'cam{i+1}: 유효 대응점 {len(good)}개로 부족합니다 (최소 20개)')
+        source = np.float32([keys[m.queryIdx].pt for m in good])
+        target = np.float32([reference_keys[m.trainIdx].pt for m in good])
+        h, mask = cv2.findHomography(source, target, cv2.RANSAC, 3.0)
+        if h is None or mask is None:
+            raise ValueError(f'cam{i+1}: 원근 변환 계산 실패')
+        selected = mask.ravel().astype(bool)
+        count = int(selected.sum())
+        ratio = count / len(good)
+        if count < 15 or ratio < .45:
+            raise ValueError(f'cam{i+1}: 정합 신뢰도 부족 ({count}/{len(good)} 대응점)')
+        projected = cv2.perspectiveTransform(source[selected, None, :], h)[:, 0]
+        error = float(np.median(np.linalg.norm(projected - target[selected], axis=1)))
+        coverage = min(cv2.contourArea(cv2.convexHull(a[selected])) for a in (source, target)) / (640*480)
+        if not np.isfinite(h).all() or not np.isfinite(error) or error > 2.5 or coverage < .03:
+            raise ValueError(f'cam{i+1}: 오차가 크거나 특징점이 좁은 영역에 몰려 있습니다')
+        estimates.append(h)
+        reports.append({'camera': i+1, 'matches': len(good), 'inliers': count,
+                        'inlier_ratio': round(ratio, 3), 'median_error_px': round(error, 3),
+                        'coverage_percent': round(coverage*100, 1)})
+    # Encode homographies as compatible four-point controls, shared in cam1 coordinates.
+    # Find a broad reference rectangle whose inverse projections lie inside both sources.
+    for margin in (60, 90, 120, 150):
+        reference = np.float32([[margin,margin],[639-margin,margin],
+                                [639-margin,479-margin],[margin,479-margin]])
+        controls = [reference.tolist()]
+        try:
+            for h in estimates:
+                source = cv2.perspectiveTransform(reference[None], np.linalg.inv(h))[0]
+                controls.append(source.tolist())
+            registration_matrices(controls)
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+        return {'points': controls, 'reports': reports,
+                'note': '선택한 한 시점의 고정 변환입니다. 이동 영상 전체의 프레임별 자동 정합은 아닙니다.'}
+    raise ValueError('세 영상의 안전한 공통 정합 영역이 부족합니다. 수동 정합으로 확인하세요')
+
+
 def warp_channel(gray, matrix, offset):
     dx, dy = offset
     translation = np.float64([[1, 0, dx], [0, 1, dy], [0, 0, 1]])
@@ -283,7 +340,7 @@ def create_app(rig):
                 if not (folder / 'session.json').is_file(): raise ValueError('완료된 세션이 아닙니다')
                 return jsonify(compose(folder, body['mapping'], body['offsets'], body.get('points'), body.get('adjustments')))
             return jsonify(error='알 수 없는 작업'), 404
-        except (ValueError, RuntimeError, KeyError, TypeError, OSError) as exc:
+        except (ValueError, RuntimeError, KeyError, TypeError, OSError, cv2.error) as exc:
             return jsonify(error=str(exc)), 400
         finally:
             job_lock.release()
@@ -308,6 +365,7 @@ def create_app(rig):
             if len(offsets) != 3 or any(len(x) != 2 or not all(np.isfinite(v) and abs(v) <= 640 for v in x) for x in offsets):
                 raise ValueError('이동값 범위를 확인하세요')
             matrices = registration_matrices(body.get('points'), body.get('adjustments'))
+            auto = body.get('auto_register', False)
             raw = body.get('raw')
             if raw is not None and (type(raw) is not int or raw not in range(3)):
                 raise ValueError('잘못된 카메라 번호')
@@ -337,13 +395,15 @@ def create_app(rig):
                 finally:
                     cap.release()
                 g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                gray.append(g if raw is not None else warp_channel(g, matrices[i], offsets[i]))
+                gray.append(g if raw is not None or auto else warp_channel(g, matrices[i], offsets[i]))
+            if auto:
+                return jsonify(automatic_registration(gray))
             merged = cv2.merge([gray[mapping[2]], gray[mapping[1]], gray[mapping[0]]])
             ok, encoded = cv2.imencode('.jpg', merged if raw is None else gray[raw], [cv2.IMWRITE_JPEG_QUALITY, 90])
             if not ok:
                 raise RuntimeError('미리보기 인코딩 실패')
             return Response(encoded.tobytes(), mimetype='image/jpeg', headers={'Cache-Control': 'no-store'})
-        except (ValueError, RuntimeError, KeyError, TypeError, OSError) as exc:
+        except (ValueError, RuntimeError, KeyError, TypeError, OSError, cv2.error) as exc:
             return jsonify(error=str(exc)), 400
 
     @app.get('/api/sessions')

@@ -13,6 +13,10 @@
 <img id="alignment" alt="완료된 세션을 선택하면 RGB 중첩 영상이 표시됩니다" style="max-width:960px;border:1px solid #658090">
 <p id="previewStatus" role="status"></p>
 <p><small>같은 물체의 윤곽이 겹치도록 이동하세요. 색이 갈라진 윤곽은 정렬 차이를 나타냅니다. 먼저 R=cam1, G=cam2, B=cam3으로 두고 cam1을 기준으로 cam2·cam3을 조정하세요. 시간 슬라이더로 정지된 장면을 고를 수 있습니다.</small></p>
+<h3>자동 정합 — 필터 없는 영상 검증</h3>
+<p><button id="autoRegister" onclick="autoRegister()">선택 장면 자동 정합</button> <button onclick="restoreRegistration()">자동 정합 전 설정 복원</button></p>
+<p><small>cam1을 기준으로 ORB 특징점과 RANSAC 원근 변환을 계산합니다. 평평하고 무늬가 많은 정지 대상을 선택하세요. 성공한 경우에만 두 카메라 보정을 함께 적용합니다. 선택한 한 장면의 고정 보정이며, 이동 영상 전체를 프레임마다 추적하는 기능은 아닙니다.</small></p>
+<pre id="autoReport" role="status"></pre>
 <h3>4점 원근 정합 — cam1 기준</h3>
 <p>같은 평면의 특징점 4개를 각 영상에서 <strong>동일한 순서</strong>로 클릭하세요. 예: 종이의 왼쪽 위 → 오른쪽 위 → 오른쪽 아래 → 왼쪽 아래. 점은 넓게 분포시키세요. cam1과 cam2부터 선택한 다음 cam3을 맞출 수 있습니다.</p>
 <p><small>아래 영상은 보정 전 원본입니다. 4점을 완성하면 위 중첩 미리보기에 자동 적용됩니다. 서로 다른 거리의 물체와 렌즈 왜곡은 한 번의 원근 변환으로 모두 맞지 않습니다.</small></p>
@@ -71,9 +75,23 @@ function selectPixel(){if(!pixelCursor)return;const {i,x,y}=pixelCursor;if(!rawI
 window.addEventListener('scroll',hideLoupe,true);window.addEventListener('resize',hideLoupe);
 
 async function rawFrames(){const version=++rawVersion;hideLoupe();pixelCursor=null;rawImages.forEach(image=>{if(image)image.close();});rawImages=[null,null,null];[0,1,2].forEach(drawPoints);if(!el('sessions').value)return;el('pointStatus').textContent='원본 프레임 읽는 중…';try{await Promise.all([0,1,2].map(async i=>{const body={...payload(),raw:i,points:[[],[],[]],adjustments:[[0,1],[0,1],[0,1]]};const r=await post('preview',body);if(!r.ok)throw Error((await r.json()).error);const image=await createImageBitmap(await r.blob());if(version!==rawVersion){image.close();return;}rawImages[i]=image;drawPoints(i);}));if(version===rawVersion)el('pointStatus').textContent='각 영상에서 같은 특징점 4개를 같은 순서로 클릭하세요.';}catch(e){if(version===rawVersion)el('pointStatus').textContent=String(e);}}
-async function selectedSession(){const name=el('sessions').value;loadedSession=name;points=[[],[],[]];[0,1,2].forEach(i=>{el('x'+i).value=0;el('y'+i).value=0;el('angle'+i).value=0;el('scale'+i).value=1;});try{if(name){const r=await post('preview',{session:name,load_profile:true});if(!r.ok)throw Error((await r.json()).error);const saved=await r.json();if(el('sessions').value!==name)return;if(saved.points)points=saved.points;if(saved.rgb_cameras)saved.rgb_cameras.forEach((v,i)=>el('map'+i).value=v);if(saved.xy_offsets)saved.xy_offsets.forEach((v,i)=>{el('x'+i).value=v[0];el('y'+i).value=v[1];});if(saved.adjustments)saved.adjustments.forEach((v,i)=>{el('angle'+i).value=v[0];el('scale'+i).value=v[1];});}}catch(e){el('result').textContent=String(e);}await rawFrames();queuePreview();}
+async function selectedSession(){const name=el('sessions').value;loadedSession=name;registrationBackup=null;el('autoReport').textContent='';points=[[],[],[]];[0,1,2].forEach(i=>{el('x'+i).value=0;el('y'+i).value=0;el('angle'+i).value=0;el('scale'+i).value=1;});try{if(name){const r=await post('preview',{session:name,load_profile:true});if(!r.ok)throw Error((await r.json()).error);const saved=await r.json();if(el('sessions').value!==name)return;if(saved.points)points=saved.points;if(saved.rgb_cameras)saved.rgb_cameras.forEach((v,i)=>el('map'+i).value=v);if(saved.xy_offsets)saved.xy_offsets.forEach((v,i)=>{el('x'+i).value=v[0];el('y'+i).value=v[1];});if(saved.adjustments)saved.adjustments.forEach((v,i)=>{el('angle'+i).value=v[0];el('scale'+i).value=v[1];});}}catch(e){el('result').textContent=String(e);}await rawFrames();queuePreview();}
 async function sessions(){const names=await(await fetch('/api/sessions')).json();const old=el('sessions').value;el('sessions').replaceChildren(...names.map(n=>new Option(n,n)));if(names.includes(old))el('sessions').value=old;if(loadedSession!==el('sessions').value)await selectedSession();else queuePreview();}
 async function act(action,body={}){try{const r=await post(action,body);const data=await r.json();el('result').textContent=JSON.stringify(data,null,2);await sessions();}catch(e){el('result').textContent=String(e);}}
+let registrationBackup=null;
+function registrationSnapshot(){return {session:el('sessions').value,points:JSON.parse(JSON.stringify(points)),offsets:payload().offsets,adjustments:payload().adjustments};}
+function applyRegistration(state){points=state.points;[0,1,2].forEach(i=>{el('x'+i).value=state.offsets[i][0];el('y'+i).value=state.offsets[i][1];el('angle'+i).value=state.adjustments[i][0];el('scale'+i).value=state.adjustments[i][1];drawPoints(i);});queuePreview();}
+function restoreRegistration(){if(!registrationBackup||registrationBackup.session!==el('sessions').value){el('autoReport').textContent='이 세션에 복원할 설정이 없습니다.';return;}applyRegistration(registrationBackup);el('autoReport').textContent='이전 정합 설정을 복원했습니다.';}
+async function autoRegister(){
+ const session=el('sessions').value,position=el('position').value;
+ if(!session){el('autoReport').textContent='완료된 세션을 선택하세요.';return;}
+ const before=registrationSnapshot();el('autoRegister').disabled=true;el('autoReport').textContent='특징점 분석 중…';
+ try{const r=await post('preview',{...payload(),points:[[],[],[]],adjustments:[[0,1],[0,1],[0,1]],auto_register:true});const result=await r.json();if(!r.ok)throw Error(result.error);
+ if(session!==el('sessions').value||position!==el('position').value||JSON.stringify(before)!==JSON.stringify(registrationSnapshot())){el('autoReport').textContent='장면이 바뀌어 결과를 적용하지 않았습니다. 다시 실행하세요.';return;}
+ registrationBackup=before;applyRegistration({points:result.points,offsets:[[0,0],[0,0],[0,0]],adjustments:[[0,1],[0,1],[0,1]]});
+ el('autoReport').textContent=result.reports.map(r=>`cam${r.camera}: 유효점 ${r.inliers}/${r.matches}, 중앙 오차 ${r.median_error_px}px, 분포 ${r.coverage_percent}%`).join('\n')+'\n'+result.note+'\n표시된 4점은 계산한 변환의 제어점입니다. 중첩 결과를 확인한 뒤 합성 저장하세요.';
+ }catch(e){el('autoReport').textContent='자동 정합 실패 — 기존 설정 유지: '+String(e);}finally{el('autoRegister').disabled=false;}
+}
 function queuePreview(){clearTimeout(previewTimer);previewTimer=setTimeout(preview,250);}
 async function preview(){
  if(previewController)previewController.abort();

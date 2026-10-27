@@ -6,7 +6,7 @@ from pathlib import Path
 import csv
 import cv2
 import numpy as np
-from app import Rig, create_app, registration_matrices, warp_channel
+from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration
 
 
 class WorkflowTest(unittest.TestCase):
@@ -29,6 +29,41 @@ class WorkflowTest(unittest.TestCase):
             registration_matrices([[], source.tolist(), []])
         with self.assertRaises(ValueError):
             registration_matrices(adjustments=[[0,0], [0,1], [0,1]])
+
+    def test_automatic_registration(self):
+        rng = np.random.default_rng(42)
+        reference = cv2.GaussianBlur(rng.integers(0, 256, (480,640), dtype=np.uint8), (3,3), 0)
+        known = [np.eye(3), np.array([[1.02,-.025,8],[.018,.98,-5],[.00004,-.00003,1]]),
+                 np.array([[.98,.02,-7],[-.015,1.015,9],[-.00003,.00004,1]])]
+        frames = [cv2.warpPerspective(reference, np.linalg.inv(h), (640,480)) for h in known]
+        estimated = automatic_registration(frames)
+        matrices = registration_matrices(estimated['points'])
+        probes = np.float32([[[100,100],[300,200],[500,350]]])
+        for i in (1,2):
+            actual = cv2.perspectiveTransform(probes, matrices[i])
+            expected = cv2.perspectiveTransform(probes, known[i])
+            self.assertLess(float(np.max(np.linalg.norm(actual-expected, axis=2))), 2)
+            self.assertGreaterEqual(estimated['reports'][i-1]['inliers'], 15)
+        with self.assertRaises(ValueError):
+            automatic_registration([np.zeros((480,640),np.uint8)]*3)
+        with self.assertRaises(ValueError):
+            automatic_registration([reference, rng.integers(0,256,(480,640),dtype=np.uint8), frames[2]])
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)/'fixture'
+            folder.mkdir()
+            (folder/'session.json').write_text('{}')
+            for i, frame in enumerate(frames):
+                writer = cv2.VideoWriter(str(folder/f'cam{i+1}.avi'), cv2.VideoWriter_fourcc(*'MJPG'), 30, (640,480))
+                self.assertTrue(writer.isOpened())
+                for _ in range(3): writer.write(cv2.cvtColor(frame,cv2.COLOR_GRAY2BGR))
+                writer.release()
+                (folder/f'cam{i+1}.csv').write_text('frame,monotonic_ns\n0,1000000000\n1,1033333333\n2,1066666666\n')
+            client = create_app(Rig(demo=True, output=temp)).test_client()
+            body = {'session':'fixture','mapping':[0,1,2],'offsets':[[0,0]]*3,'auto_register':True}
+            response = client.post('/api/preview',json=body,headers={'X-Rig-Request':'1'})
+            self.assertEqual(response.status_code,200,response.json)
+            self.assertEqual(len(response.json['reports']),2)
+            self.assertFalse((folder/'alignment.json').exists())
 
     def test_record_and_compose(self):
         with tempfile.TemporaryDirectory() as temp:
