@@ -7,7 +7,7 @@ import csv
 import json
 import cv2
 import numpy as np
-from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration, TemporalRegistration, GlobalTranslationStabilizer, smooth_registration_path, LocalRefinement
+from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration, TemporalRegistration, GlobalTranslationStabilizer, smooth_registration_path, LocalRefinement, LiveLocalRefinement
 
 
 class WorkflowTest(unittest.TestCase):
@@ -65,6 +65,60 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(response.status_code,200,response.json)
             self.assertEqual(len(response.json['reports']),2)
             self.assertFalse((folder/'alignment.json').exists())
+
+    def test_live_processing_with_recording_and_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            rig=Rig(demo=True,output=folder)
+            rig.start()
+            try:
+                client=create_app(rig).test_client()
+                headers={'X-Rig-Request':'1'}
+                self.assertEqual(client.post('/api/live/start',json={}).status_code,403)
+                self.assertEqual(client.post('/api/live/start',headers=headers,json={'target_fps':100}).status_code,400)
+                self.assertEqual(client.post('/api/live/start',headers=headers,json={'flow_width':320,'target_fps':5}).status_code,200)
+                self.assertEqual(client.post('/api/live/start',headers=headers,json={}).status_code,400)
+                deadline=time.monotonic()+8
+                while time.monotonic()<deadline:
+                    status=client.get('/api/status').json
+                    if status['live'].get('processed',0)>=2:break
+                    time.sleep(.05)
+                else:self.fail(str(status))
+                response=client.get('/live/stream',buffered=False)
+                chunk=next(response.response);response.close()
+                encoded=chunk.split(b'\r\n\r\n',1)[1].rsplit(b'\r\n',1)[0]
+                image=cv2.imdecode(np.frombuffer(encoded,np.uint8),cv2.IMREAD_COLOR)
+                self.assertEqual(image.shape,(480,640,3))
+                record=client.post('/api/start',headers=headers)
+                self.assertEqual(record.status_code,200,record.json)
+                time.sleep(.4)
+                client.post('/api/stop',headers=headers)
+                self.assertTrue((Path(folder)/record.json['session']/'session.json').exists())
+                self.assertGreater(status['live']['processing_ms'],0)
+                self.assertGreaterEqual(status['live']['host_age_ms'],0)
+                stopped=client.post('/api/live/stop',headers=headers)
+                self.assertFalse(stopped.json['running'])
+                self.assertFalse(rig.live.thread.is_alive())
+                restarted=client.post('/api/live/start',headers=headers,json={'target_fps':10,'flow_width':320})
+                self.assertEqual(restarted.status_code,200)
+                client.post('/api/live/stop',headers=headers)
+                self.assertTrue(all(len(history)<=8 for history in rig.history))
+            finally:rig.close()
+
+    def test_live_reduced_flow_registration(self):
+        rng=np.random.default_rng(33)
+        reference=cv2.GaussianBlur(rng.integers(20,230,(480,640),dtype=np.uint8),(5,5),0)
+        y,x=np.indices(reference.shape,dtype=np.float32)
+        source=cv2.remap(reference,x+8,y,cv2.INTER_LINEAR)
+        live=LiveLocalRefinement(320)
+        out,checked,fraction=live.refine([reference,source,source])
+        self.assertTrue(checked)
+        region=np.s_[40:440,40:600]
+        before=np.mean(np.abs(reference[region].astype(float)-source[region]))
+        after=np.mean(np.abs(reference[region].astype(float)-out[1][region]))
+        self.assertLess(after,before*.3)
+        _,checked,remembered=live.refine([reference,source,source])
+        self.assertFalse(checked)
+        self.assertEqual(remembered,fraction)
 
     def test_local_registration_two_depth_regions(self):
         rng=np.random.default_rng(92)

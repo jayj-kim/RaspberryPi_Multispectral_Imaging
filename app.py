@@ -2,6 +2,7 @@
 import argparse
 import atexit
 import csv
+from collections import deque
 import json
 from pathlib import Path
 import subprocess
@@ -25,6 +26,8 @@ class Rig:
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.frames = [None] * 3
+        self.history = [deque(maxlen=8) for _ in range(3)]
+        self.live = None
         self.status = [{'frames': 0, 'fps': 0, 'error': '시작 중'} for _ in range(3)]
         self.recording = None
         self.threads = []
@@ -67,6 +70,7 @@ class Rig:
                 count += 1
                 with self.lock:
                     self.frames[i] = frame
+                    self.history[i].append((stamp, frame, count))
                     self.status[i] = {'frames': count, 'fps': round(count / (time.monotonic() - started), 2), 'error': None}
                     if self.recording:
                         rec = self.recording
@@ -126,6 +130,7 @@ class Rig:
             return rec['folder'].name
 
     def close(self):
+        if self.live is not None:self.live.stop_processing()
         self.stop.set()
         for t in self.threads: t.join(timeout=2)
         self.finish()
@@ -679,9 +684,171 @@ def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=Fal
         if local is not None:local.close()
 
 
+class LiveLocalRefinement:
+    """Reduced-resolution residual DIS; compute a single latest output, never queue frames."""
+    def __init__(self,width=320):
+        self.width=width
+        self.height=width*3//4
+        self.engine=cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
+        self.clahe=cv2.createCLAHE(clipLimit=2,tileGridSize=(8,8))
+        y,x=np.indices((480,640),dtype=np.float32)
+        self.grid=np.dstack([x,y])
+        self.count=0
+        self.last_consistency=None
+
+    def refine(self,channels):
+        small=[self.clahe.apply(cv2.resize(g,(self.width,self.height))) for g in channels]
+        corrected=[channels[0]]
+        check=self.count%5==0
+        masks=[]
+        for i in (1,2):
+            low=self.engine.calc(small[0],small[i],None)
+            flow=cv2.resize(low,(640,480))*(640/self.width)
+            coords=self.grid+flow
+            mapped=cv2.remap(channels[i],coords,None,cv2.INTER_LINEAR)
+            bounded=np.isfinite(coords).all(axis=2)&(np.linalg.norm(flow,axis=2)<60)
+            corrected.append(np.where(bounded,mapped,channels[i]).astype(np.uint8))
+            if check:
+                low_back=self.engine.calc(small[i],small[0],None)
+                back=cv2.resize(low_back,(640,480))*(640/self.width)
+                reverse=cv2.remap(back,coords,None,cv2.INTER_LINEAR,borderMode=cv2.BORDER_CONSTANT,borderValue=1000)
+                valid=bounded&(np.linalg.norm(flow+reverse,axis=2)<1.5)
+                valid&=(coords[:,:,0]>=0)&(coords[:,:,0]<639)&(coords[:,:,1]>=0)&(coords[:,:,1]<479)
+                valid&=(channels[0]>2)&(mapped>2)
+                masks.append(valid)
+        if check:self.last_consistency=float((masks[0]&masks[1]).mean())
+        self.count+=1
+        return corrected,check,self.last_consistency
+
+
+class RealtimeComposer:
+    def __init__(self,rig):
+        self.rig=rig
+        self.lock=threading.RLock()
+        self.condition=threading.Condition(self.lock)
+        self.halt=threading.Event()
+        self.thread=None
+        self.jpeg=None
+        self.sequence=0
+        self.metrics={'running':False}
+
+    def status(self):
+        with self.lock:
+            data=self.metrics.copy()
+            if data.get('source_ns'):
+                data['host_age_ms']=round((time.monotonic_ns()-data['source_ns'])/1e6,1)
+            return data
+
+    def start_processing(self,body):
+        mapping=body.get('mapping',[0,1,2])
+        offsets=body.get('offsets',[[0,0]]*3)
+        if sorted(mapping)!=[0,1,2]:raise ValueError('RGB 카메라 배치를 확인하세요')
+        if np.asarray(offsets).shape!=(3,2) or not np.isfinite(offsets).all() or np.max(np.abs(offsets))>640:
+            raise ValueError('이동값을 확인하세요')
+        width=body.get('flow_width',320)
+        fps=body.get('target_fps',5)
+        if type(width)is not int or width not in (320,480,640):raise ValueError('계산 폭은 320/480/640입니다')
+        if type(fps)is not int or fps not in (5,10):raise ValueError('목표 속도는 5/10fps입니다')
+        matrices=registration_matrices(body.get('points'),body.get('adjustments'))
+        with self.lock:
+            if self.thread and self.thread.is_alive():raise ValueError('실시간 합성이 이미 실행 중입니다')
+            self.halt.clear();self.jpeg=None;self.sequence=0
+            self.metrics={'running':True,'processed':0,'target_fps':fps,'flow_width':width,'warning':'첫 프레임 대기'}
+            self.thread=threading.Thread(target=self.run,args=(mapping,offsets,matrices,body.get('adjustments'),width,fps),daemon=True)
+            self.thread.start()
+
+    def stop_processing(self):
+        self.halt.set()
+        with self.condition:self.condition.notify_all()
+        thread=self.thread
+        if thread and thread is not threading.current_thread():thread.join(timeout=10)
+        with self.lock:
+            if thread and thread.is_alive():
+                self.metrics['warning']='현재 프레임 처리 종료를 기다리는 중입니다'
+            else:self.metrics['running']=False
+
+    def snapshot(self):
+        with self.rig.lock:
+            if any(s['error'] for s in self.rig.status):raise ValueError('카메라 상태를 확인하세요')
+            if any(not h for h in self.rig.history):raise ValueError('카메라 프레임 대기 중')
+            stamp=min(h[-1][0] for h in self.rig.history)
+            chosen=[min(h,key=lambda x:abs(x[0]-stamp)) for h in self.rig.history]
+        if (time.monotonic_ns()-min(x[0] for x in chosen))/1e9>1:
+            raise ValueError('카메라 프레임이 1초 이상 갱신되지 않았습니다')
+        return chosen
+
+    def run(self,mapping,offsets,matrices,adjustments,width,fps):
+        try:
+            refiner=LiveLocalRefinement(width)
+            temporal=TemporalRegistration(matrices,'responsive')
+            last_refresh=-float('inf');last_sequence=None;previous_cam1=None
+            processed=0;skipped=0;average_fps=0;last_published=None;global_valid=False
+            while not self.halt.is_set() and not self.rig.stop.is_set():
+                started=time.monotonic()
+                try:
+                    chosen=self.snapshot()
+                except ValueError as exc:
+                    with self.lock:self.metrics['warning']=str(exc)
+                    self.halt.wait(.1);continue
+                sequence=tuple(x[2] for x in chosen)
+                if sequence==last_sequence:self.halt.wait(.01);continue
+                last_sequence=sequence
+                if previous_cam1 is not None:skipped+=max(0,sequence[0]-previous_cam1-1)
+                previous_cam1=sequence[0]
+                gray=[cv2.cvtColor(x[1],cv2.COLOR_BGR2GRAY) for x in chosen]
+                warning=None
+                if started-last_refresh>=1:
+                    last_refresh=started
+                    try:
+                        result=automatic_registration(gray)
+                        matrices,event=temporal.update(registration_matrices(result['points'],adjustments))
+                        global_valid=True
+                    except (ValueError,cv2.error,np.linalg.LinAlgError) as exc:
+                        warning='전역 재정합 실패, 기존 보정 유지: '+str(exc)
+                if not global_valid and warning is None:warning='자동 전역 정합 미확인: 초기 보정으로 처리 중'
+                warped=[warp_channel(g,matrices[i],offsets[i]) for i,g in enumerate(gray)]
+                corrected,checked,consistency=refiner.refine(warped)
+                composite=cv2.merge([corrected[mapping[2]],corrected[mapping[1]],corrected[mapping[0]]])
+                ok,encoded=cv2.imencode('.jpg',composite,[cv2.IMWRITE_JPEG_QUALITY,75])
+                if not ok:raise RuntimeError('실시간 JPEG 생성 실패')
+                published=time.monotonic()
+                if last_published is not None:
+                    current=1/max(.0001,published-last_published)
+                    average_fps=current if average_fps==0 else .8*average_fps+.2*current
+                last_published=published
+                processed+=1
+                stamps=[x[0] for x in chosen]
+                with self.condition:
+                    self.jpeg=encoded.tobytes();self.sequence+=1
+                    self.metrics.update(running=True,processed=processed,fps=round(average_fps,2),
+                        processing_ms=round((published-started)*1000,1),source_ns=min(stamps),
+                        camera_skew_ms=round((max(stamps)-min(stamps))/1e6,1),skipped_cam1=skipped,
+                        global_valid=global_valid,consistency=consistency,consistency_checked=checked,
+                        consistency_frame=processed if checked else self.metrics.get('consistency_frame'),warning=warning)
+                    self.condition.notify_all()
+                self.halt.wait(max(0,1/fps-(time.monotonic()-started)))
+        except Exception as exc:
+            with self.lock:self.metrics['warning']='실시간 합성 중단: '+str(exc)
+        finally:
+            with self.condition:
+                self.metrics['running']=False
+                self.condition.notify_all()
+
+    def images(self):
+        last=-1
+        while not self.rig.stop.is_set() and not self.halt.is_set():
+            with self.condition:
+                self.condition.wait_for(lambda:(self.jpeg is not None and self.sequence!=last) or self.halt.is_set() or not self.metrics.get('running'),timeout=1)
+                if self.halt.is_set() or not self.metrics.get('running'):return
+                if self.jpeg is None or self.sequence==last:continue
+                last=self.sequence;data=self.jpeg
+            yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'+data+b'\r\n'
+
+
 def create_app(rig):
     app = Flask(__name__)
     job_lock = threading.Lock()
+    if rig.live is None:rig.live=RealtimeComposer(rig)
     processing = {'snapshot': {'running': False}}
 
     def update_progress(snapshot):
@@ -704,7 +871,26 @@ def create_app(rig):
     @app.get('/api/status')
     def status():
         with rig.lock:
-            return jsonify(processing=processing['snapshot'], cameras=rig.status, recording=rig.recording['folder'].name if rig.recording else None)
+            return jsonify(live=rig.live.status(), processing=processing['snapshot'], cameras=rig.status, recording=rig.recording['folder'].name if rig.recording else None)
+
+    @app.post('/api/live/start')
+    def start_live():
+        if not job_lock.acquire(blocking=False):return jsonify(error='후처리 합성 중에는 실시간 합성을 시작할 수 없습니다'),409
+        try:
+            rig.live.start_processing(request.get_json() or {})
+            return jsonify(rig.live.status())
+        except (ValueError,TypeError,cv2.error) as exc:
+            return jsonify(error=str(exc)),400
+        finally:job_lock.release()
+
+    @app.post('/api/live/stop')
+    def stop_live():
+        rig.live.stop_processing()
+        return jsonify(rig.live.status())
+
+    @app.get('/live/stream')
+    def live_stream():
+        return Response(rig.live.images(),mimetype='multipart/x-mixed-replace; boundary=frame',headers={'Cache-Control':'no-store'})
 
     @app.get('/stream/<int:i>')
     def stream(i):
@@ -727,6 +913,7 @@ def create_app(rig):
             if action == 'start': return jsonify(session=rig.begin())
             if action == 'stop': return jsonify(session=rig.finish())
             if action == 'compose':
+                if rig.live.status().get('running'):raise ValueError('실시간 합성을 중지한 후 후처리 합성을 실행하세요')
                 body = request.get_json()
                 name = body['session']
                 if not isinstance(name, str) or Path(name).name != name or name in ('.', '..'):
@@ -823,7 +1010,10 @@ if __name__ == '__main__':
     parser.add_argument('--demo', action='store_true')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--port', type=int, default=8000)
+    parser.add_argument('--cv-threads', type=int, default=2)
     args = parser.parse_args()
+    if args.cv_threads<1:parser.error('--cv-threads는 1 이상이어야 합니다')
+    cv2.setNumThreads(args.cv_threads)
     rig = Rig(args.demo, args.output)
     atexit.register(rig.close)
     rig.start()
