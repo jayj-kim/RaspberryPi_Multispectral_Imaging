@@ -40,7 +40,7 @@ class Rig:
         try:
             if not self.demo:
                 dev = DEVICES[i]
-                for ctrl in ['auto_exposure=1', 'exposure_time_absolute=625']:
+                for ctrl in ['auto_exposure=1', 'exposure_time_absolute=4500']:
                     subprocess.run(['v4l2-ctl', '-d', dev, '--set-ctrl=' + ctrl],
                                    check=True, capture_output=True, timeout=5)
                 cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)

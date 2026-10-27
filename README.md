@@ -37,7 +37,7 @@ USB 포트를 바꾼 경우 `ls -l /dev/v4l/by-path/`로 확인해 수정하세�
 | cam3 | platform-xhci-hcd.1-usb-0:1:1.0-video-index0 |
 
 입력은 YUYV 640×480, 요청 프레임률 30fps입니다.
-실행 시 수동 노출(`auto_exposure=1`, `exposure_time_absolute=625`)을 적용합니다.
+실행 시 수동 노출(`auto_exposure=1`, `exposure_time_absolute=4500`)을 적용합니다.
 종료 후에도 설정은 남습니다. 필요하면 각 장치에
 `v4l2-ctl -d /dev/video0 --set-ctrl=auto_exposure=3`처럼 자동 노출을 복원하세요.
 권한 오류는 `id`로 video 그룹 가입 여부를 확인하세요. 필요한 경우
