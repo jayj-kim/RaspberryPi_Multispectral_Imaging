@@ -237,13 +237,19 @@ def warp_channel(gray, matrix, offset):
     return cv2.warpPerspective(gray, translation @ matrix, (640, 480))
 
 
-def compose(folder, mapping, offsets, points=None, adjustments=None):
+def compose(folder, mapping, offsets, points=None, adjustments=None, dynamic=False, progress=None):
     """Nearest host timestamp matching; cam1 defines output timeline."""
     if sorted(mapping) != [0, 1, 2]:
         raise ValueError('RGB 채널에 서로 다른 카메라를 선택하세요')
     if len(offsets) != 3 or any(len(x) != 2 or not all(np.isfinite(v) and abs(v) <= 640 for v in x) for x in offsets):
         raise ValueError('이동값은 -640~640 범위의 숫자여야 합니다')
+    if type(dynamic) is not bool:
+        raise ValueError('dynamic 값은 참/거짓이어야 합니다')
     matrices = registration_matrices(points, adjustments)
+    last_valid = matrices
+    successful = 0
+    fallback = 0
+    log = None
     times = []
     caps = []
     writer = None
@@ -260,13 +266,17 @@ def compose(folder, mapping, offsets, points=None, adjustments=None):
         targets = times[0][(times[0] >= begin) & (times[0] <= end)]
         if len(targets) < 2: raise ValueError('세 영상의 공통 촬영 구간이 부족합니다')
         fps = float(1e9 / np.median(np.diff(targets)))
-        destination = folder / 'composite.avi'
+        destination = folder / ('composite_dynamic.avi' if dynamic else 'composite.avi')
+        if dynamic:
+            log = (folder / 'registration_dynamic.jsonl').open('w')
+            (folder / 'registration_dynamic_summary.json').write_text(json.dumps({'completed': False}))
         writer = cv2.VideoWriter(str(destination), cv2.VideoWriter_fourcc(*'MJPG'), fps, (640, 480))
         if not writer.isOpened(): raise RuntimeError('합성 영상 저장기 초기화 실패')
         positions = [-1]*3
         frames = [None]*3
-        for stamp in targets:
+        for number, stamp in enumerate(targets):
             gray = []
+            source_stamps = []
             for i in range(3):
                 right = int(np.searchsorted(times[i], stamp))
                 candidates = [k for k in (right-1, right) if 0 <= k < len(times[i])]
@@ -275,19 +285,64 @@ def compose(folder, mapping, offsets, points=None, adjustments=None):
                     ok, frames[i] = caps[i].read()
                     if not ok: raise ValueError('프레임 기록과 영상 길이가 다릅니다')
                     positions[i] += 1
-                g = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY)
-                gray.append(warp_channel(g, matrices[i], offsets[i]))
+                source_stamps.append(int(times[i][idx]))
+                gray.append(cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY))
+            state, reason, quality = 'static', None, []
+            if dynamic:
+                try:
+                    result = automatic_registration(gray)
+                    candidate = registration_matrices(result['points'], adjustments)
+                    # Smooth projected image corners, rather than averaging matrix coefficients.
+                    # Do not blend a first detection with an unverified initial fallback.
+                    if successful:
+                        corners = np.float32([[[0,0],[639,0],[639,479],[0,479]]])
+                        smoothed = [candidate[0]]
+                        for i in (1,2):
+                            current = cv2.perspectiveTransform(corners, candidate[i])[0]
+                            previous = cv2.perspectiveTransform(corners, last_valid[i])[0]
+                            dest = .8 * current + .2 * previous
+                            h = cv2.getPerspectiveTransform(corners[0], dest.astype(np.float32))
+                            denominator = (h @ np.c_[corners[0], np.ones(4)].T)[2]
+                            if not np.isfinite(h).all() or abs(np.linalg.det(h)) < 1e-10 or np.min(denominator) <= 0 <= np.max(denominator):
+                                raise ValueError('안정화 변환이 유효하지 않습니다')
+                            smoothed.append(h)
+                        candidate = smoothed
+                    last_valid = candidate
+                    successful += 1
+                    state, quality = 'estimated', result['reports']
+                except (ValueError, cv2.error, np.linalg.LinAlgError) as exc:
+                    fallback += 1
+                    state = 'fallback_previous' if successful else 'fallback_initial'
+                    reason = str(exc)
+                matrices = last_valid
+                log.write(json.dumps({'frame': number, 'monotonic_ns': int(stamp),
+                    'source_monotonic_ns': source_stamps, 'state': state, 'reason': reason,
+                    'quality': quality, 'matrices': [h.tolist() for h in matrices]}) + '\n')
+            gray = [warp_channel(g, matrices[i], offsets[i]) for i, g in enumerate(gray)]
+            if progress:
+                progress({'running': True, 'done': number+1, 'total': len(targets),
+                          'estimated': successful, 'fallback': fallback})
             writer.write(cv2.merge([gray[mapping[2]], gray[mapping[1]], gray[mapping[0]]]))
-        (folder / 'alignment.json').write_text(json.dumps({'rgb_cameras': mapping, 'xy_offsets': offsets, 'points': points, 'adjustments': adjustments}, indent=2))
-        return {'file': str(destination), 'frames': len(targets), 'fps': round(fps, 2)}
+        (folder / 'alignment.json').write_text(json.dumps({'rgb_cameras': mapping, 'xy_offsets': offsets, 'points': points, 'adjustments': adjustments, 'dynamic': dynamic}, indent=2))
+        summary = {'file': str(destination), 'frames': len(targets), 'fps': round(fps, 2),
+                   'dynamic': dynamic, 'estimated': successful, 'fallback': fallback,
+                   'warning': '자동 정합 성공 프레임이 없습니다. 초기 보정값만 사용했습니다.' if dynamic and not successful else None}
+        if dynamic:
+            (folder / 'registration_dynamic_summary.json').write_text(json.dumps({'completed': True, **summary}, indent=2))
+        return summary
     finally:
         for cap in caps: cap.release()
         if writer is not None: writer.release()
+        if log is not None: log.close()
 
 
 def create_app(rig):
     app = Flask(__name__)
     job_lock = threading.Lock()
+    processing = {'snapshot': {'running': False}}
+
+    def update_progress(snapshot):
+        processing['snapshot'] = snapshot
 
     @app.before_request
     def local_requests():
@@ -306,7 +361,7 @@ def create_app(rig):
     @app.get('/api/status')
     def status():
         with rig.lock:
-            return jsonify(cameras=rig.status, recording=rig.recording['folder'].name if rig.recording else None)
+            return jsonify(processing=processing['snapshot'], cameras=rig.status, recording=rig.recording['folder'].name if rig.recording else None)
 
     @app.get('/stream/<int:i>')
     def stream(i):
@@ -338,7 +393,15 @@ def create_app(rig):
                 with rig.lock:
                     if rig.recording: raise ValueError('녹화를 중지한 후 합성하세요')
                 if not (folder / 'session.json').is_file(): raise ValueError('완료된 세션이 아닙니다')
-                return jsonify(compose(folder, body['mapping'], body['offsets'], body.get('points'), body.get('adjustments')))
+                update_progress({'running': True, 'done': 0, 'total': 0})
+                try:
+                    return jsonify(compose(folder, body['mapping'], body['offsets'], body.get('points'),
+                        body.get('adjustments'), body.get('dynamic', False), update_progress))
+                except Exception as exc:
+                    update_progress({**processing['snapshot'], 'error': str(exc)})
+                    raise
+                finally:
+                    update_progress({**processing['snapshot'], 'running': False})
             return jsonify(error='알 수 없는 작업'), 404
         except (ValueError, RuntimeError, KeyError, TypeError, OSError, cv2.error) as exc:
             return jsonify(error=str(exc)), 400

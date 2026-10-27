@@ -4,6 +4,7 @@ import time
 import unittest
 from pathlib import Path
 import csv
+import json
 import cv2
 import numpy as np
 from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration
@@ -64,6 +65,55 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(response.status_code,200,response.json)
             self.assertEqual(len(response.json['reports']),2)
             self.assertFalse((folder/'alignment.json').exists())
+
+    def test_dynamic_video_registration_and_fallback(self):
+        rng = np.random.default_rng(9)
+        texture = cv2.GaussianBlur(rng.integers(0,256,(480,640),dtype=np.uint8),(3,3),0)
+        known = {}
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)/'moving'
+            folder.mkdir()
+            (folder/'session.json').write_text('{}')
+            (folder/'composite.avi').write_bytes(b'preserve static output')
+            writers = [cv2.VideoWriter(str(folder/f'cam{i+1}.avi'),cv2.VideoWriter_fourcc(*'MJPG'),30,(640,480)) for i in range(3)]
+            for n in range(6):
+                transforms = [np.eye(3), np.array([[1+n*.003, -.01, 6+n*2],[.01,1,-3],[0,0,1.]]),
+                              np.array([[1,-.01,-6-n*2],[.01,1+n*.003,3],[0,0,1.]])]
+                known[n] = transforms
+                for i in range(3):
+                    frame = np.zeros_like(texture) if n in (0,5) else cv2.warpPerspective(texture,np.linalg.inv(transforms[i]),(640,480))
+                    writers[i].write(cv2.cvtColor(frame,cv2.COLOR_GRAY2BGR))
+            for i,w in enumerate(writers):
+                w.release()
+                (folder/f'cam{i+1}.csv').write_text('frame,monotonic_ns\n'+''.join(f'{n},{1000000000+n*33333333}\n' for n in range(6)))
+            client = create_app(Rig(demo=True,output=temp)).test_client()
+            response = client.post('/api/compose',headers={'X-Rig-Request':'1'},json={
+                'session':'moving','mapping':[0,1,2],'offsets':[[0,0]]*3,'dynamic':True})
+            self.assertEqual(response.status_code,200,response.json)
+            self.assertEqual(response.json['estimated'],4)
+            self.assertEqual(response.json['fallback'],2)
+            records = [json.loads(line) for line in (folder/'registration_dynamic.jsonl').read_text().splitlines()]
+            self.assertEqual(len(records),6)
+            self.assertEqual(records[0]['state'],'fallback_initial')
+            self.assertEqual(records[-1]['state'],'fallback_previous')
+            np.testing.assert_allclose(records[-1]['matrices'],records[-2]['matrices'])
+            probes=np.float32([[[150,150],[320,240],[480,320]]])
+            for n in range(1,5):
+                self.assertEqual(records[n]['state'],'estimated')
+                for i in (1,2):
+                    estimated=cv2.perspectiveTransform(probes,np.array(records[n]['matrices'][i]))
+                    expected=cv2.perspectiveTransform(probes,known[n][i])
+                    self.assertLess(float(np.max(np.linalg.norm(estimated-expected,axis=2))),3)
+            cap=cv2.VideoCapture(response.json['file'])
+            count=0
+            while cap.read()[0]: count+=1
+            cap.release()
+            self.assertEqual(count,6)
+            self.assertEqual((folder/'composite.avi').read_bytes(),b'preserve static output')
+            self.assertTrue(json.loads((folder/'registration_dynamic_summary.json').read_text())['completed'])
+            progress=client.get('/api/status').json['processing']
+            self.assertFalse(progress['running'])
+            self.assertEqual(progress['done'],6)
 
     def test_record_and_compose(self):
         with tempfile.TemporaryDirectory() as temp:
