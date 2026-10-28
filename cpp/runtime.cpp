@@ -218,7 +218,7 @@ void Live::start(json body) {
   registration(fallback(body, "points", nullptr), fallback(body, "adjustments", nullptr));
   auto map = fallback(body, "mapping", json{0, 1, 2}).get<std::vector<int>>();
   require(map.size() == 3 && std::set<int>(map.begin(), map.end()) == std::set<int>({0, 1, 2}),
-          "Invalid RGB mapping");
+          "RGB 채널에 서로 다른 카메라를 선택하세요. 예: R=cam1, G=cam2, B=cam3");
   auto offsets = fallback(body, "offsets", json{{0, 0}, {0, 0}, {0, 0}});
   require(offsets.size() == 3, "Three offsets required");
   for (auto &o : offsets) {

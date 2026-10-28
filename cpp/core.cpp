@@ -800,7 +800,7 @@ PipelineResult LivePipeline::process(const Images &bgr, double inputTime) {
   auto mapping = fallback(config, "mapping", json{0, 1, 2}).get<std::vector<int>>();
   require(mapping.size() == 3 &&
               std::set<int>(mapping.begin(), mapping.end()) == std::set<int>({0, 1, 2}),
-          "Invalid mapping");
+          "RGB 채널에 서로 다른 카메라를 선택하세요. 예: R=cam1, G=cam2, B=cam3");
   std::vector<Mat> channels = {result.channels[mapping[2]], result.channels[mapping[1]],
                                result.channels[mapping[0]]};
   merge(channels, r.image);
@@ -911,7 +911,7 @@ json preview(const fs::path &path, const json &config, Mat &image) {
   auto offset = fallback(config, "offsets", json{{0, 0}, {0, 0}, {0, 0}});
   auto map = fallback(config, "mapping", json{0, 1, 2}).get<std::vector<int>>();
   require(map.size() == 3 && std::set<int>(map.begin(), map.end()) == std::set<int>({0, 1, 2}),
-          "Invalid mapping");
+          "RGB 채널에 서로 다른 카메라를 선택하세요. 예: R=cam1, G=cam2, B=cam3");
   for (int i = 0; i < 3; i++)
     gray[i] = warp(gray[i], h[i], offset[i]);
   merge(std::vector<Mat>{gray[map[2]], gray[map[1]], gray[map[0]]}, image);
@@ -935,7 +935,7 @@ json compose(const fs::path &folder, const json &config,
   auto offset = fallback(config, "offsets", json{{0, 0}, {0, 0}, {0, 0}});
   auto map = fallback(config, "mapping", json{0, 1, 2}).get<std::vector<int>>();
   require(map.size() == 3 && std::set<int>(map.begin(), map.end()) == std::set<int>({0, 1, 2}),
-          "Invalid mapping");
+          "RGB 채널에 서로 다른 카메라를 선택하세요. 예: R=cam1, G=cam2, B=cam3");
   std::vector<Matrices> path;
   std::vector<json> records;
   std::vector<Point2d> wholeMotion;

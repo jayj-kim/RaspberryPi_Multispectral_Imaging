@@ -41,6 +41,8 @@ def main():
                     data=json.loads(request('/api/status')[2])
                     if all(c['error'] is None for c in data['cameras']):break
                     time.sleep(.05)
+                code,_,error=request('/api/live/start',{'mapping':[0,0,2]})
+                assert code==400 and 'R=cam1' in json.loads(error)['error']
                 assert request('/api/live/start',{'cpu_remap':'invalid'})[0]==400
                 assert request('/api/live/start',{'flow_width':320,'target_fps':10,'cpu_remap':'fixed'})[0]==200
                 assert request('/api/live/start',{})[0]==400

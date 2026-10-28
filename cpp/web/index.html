@@ -20,6 +20,7 @@
 <p><small>실제 속도는 기기 성능에 따라 달라집니다. 최신 프레임만 처리하며, 계산 폭과 무관하게 출력은 640×480입니다. 현재 RGB 배치·수동 보정값으로 시작합니다. 설정을 바꾸면 중지 후 다시 시작하세요. 원본 3채널 녹화는 별도로 유지되며 실시간 합성 영상은 저장하지 않습니다. 후처리의 앞뒤 프레임 평활화는 적용하지 않아 결과가 다를 수 있습니다.</small></p>
 <h2>촬영 후 합성</h2><p><small>녹화를 중지한 세션을 선택하세요. 각 카메라를 회색조로 변환해 RGB에 배치합니다. 필터가 없으면 파장별 영상이 아닙니다.</small></p>
 <select id="sessions"></select><button onclick="sessions()">목록 새로고침</button>
+<p>RGB 채널에는 서로 다른 카메라를 사용합니다. 카메라 선택을 바꾸면 해당 카메라가 있던 채널과 자동으로 교환됩니다.</p>
 <section><article><h3>R 채널</h3><select id="map0"><option value="0" selected>cam1</option><option value="1" >cam2</option><option value="2" >cam3</option></select></article><article><h3>G 채널</h3><select id="map1"><option value="0" >cam1</option><option value="1" selected>cam2</option><option value="2" >cam3</option></select></article><article><h3>B 채널</h3><select id="map2"><option value="0" >cam1</option><option value="1" >cam2</option><option value="2" selected>cam3</option></select></article></section>
 <h3>정합 미리보기</h3>
 <p>촬영 위치 <input id="position" type="range" min="0" max="1" step="0.01" value="0.5" style="width:260px"> <button onclick="preview()">미리보기 갱신</button></p>
@@ -54,6 +55,21 @@
 <button id="compose" onclick="merge()">합성 영상 저장</button><p><small>출력: 고정 정합은 composite.avi, 기존 방식은 composite_dynamic.avi이며, 실험 추적은 _tracking, 전체 안정화는 _stabilized, 시간축 평활화는 _smooth 접미사가 붙습니다. 4점 원근 변환과 회전·배율·이동을 저장 영상에도 동일하게 적용합니다. 정밀 동기화·렌즈 왜곡 보정·실시간 합성은 후속 기능입니다.</small></p><pre id="result" role="status"></pre>
 <script>
 const el=id=>document.getElementById(id);
+// Preserve a one-to-one RGB assignment, including browser-restored form values.
+let rgbMapping=[0,1,2].map(i=>Number(el('map'+i).value));
+if(new Set(rgbMapping).size!==3||rgbMapping.some(v=>!Number.isInteger(v)||v<0||v>2))rgbMapping=[0,1,2];
+rgbMapping.forEach((v,i)=>el('map'+i).value=String(v));
+function changeRgbMapping(channel){
+ const selected=Number(el('map'+channel).value);
+ if(!Number.isInteger(selected)||selected<0||selected>2)return;
+ const other=rgbMapping.indexOf(selected);
+ if(other!==channel)rgbMapping[other]=rgbMapping[channel];
+ rgbMapping[channel]=selected;
+ rgbMapping.forEach((v,i)=>el('map'+i).value=String(v));
+ queuePreview();
+}
+[0,1,2].forEach(i=>el('map'+i).addEventListener('change',()=>changeRgbMapping(i)));
+
 let points=[[],[],[]], rawImages=[null,null,null], rawVersion=0;
 let previewTimer, previewController, previewUrl, loadedSession=null;
 function payload(){return {local_refinement:el('localRefinement').checked,temporal_window:Number(el('temporalWindow').value),registration_method:el('registrationMethod').value,global_stabilization:el('globalStabilization').checked,stabilization:el('stabilization').value,dynamic:el('dynamic').checked,session:el('sessions').value,position:Number(el('position').value),mapping:[0,1,2].map(i=>Number(el('map'+i).value)),offsets:[0,1,2].map(i=>[Number(el('x'+i).value),Number(el('y'+i).value)]),points:points.map(p=>p.length===4?p:[]),adjustments:[0,1,2].map(i=>[Number(el('angle'+i).value),Number(el('scale'+i).value)])};}
@@ -143,7 +159,7 @@ el('sessions').addEventListener('change',selectedSession);
 el('globalStabilization').addEventListener('change',()=>{if(el('globalStabilization').checked){el('dynamic').checked=true;el('localRefinement').checked=false;}});
 el('localRefinement').addEventListener('change',()=>{if(el('localRefinement').checked){el('dynamic').checked=true;el('globalStabilization').checked=false;}});
 let rawTimer;el('position').addEventListener('input',()=>{clearTimeout(rawTimer);rawTimer=setTimeout(()=>{rawFrames();queuePreview();},300);});
-['map0','map1','map2',...[0,1,2].flatMap(i=>['x','y','angle','scale'].map(k=>k+i))].forEach(id=>el(id).addEventListener('input',queuePreview));
+[0,1,2].flatMap(i=>['x','y','angle','scale'].map(k=>k+i)).forEach(id=>el(id).addEventListener('input',queuePreview));
 async function merge(){if(points.some(p=>p.length>0&&p.length<4)){el('result').textContent='대응점 4개를 완성하거나 초기화하세요.';return;}el('compose').disabled=true;el('result').textContent='합성 중…';try{await act('compose',payload());}finally{el('compose').disabled=false;}}
 async function startLive(){try{const r=await post('live/start',{...payload(),compute_backend:el('liveBackend').value,cpu_remap:el('cpuRemap').value,flow_width:Number(el('liveWidth').value),target_fps:Number(el('liveFps').value)});const data=await r.json();if(!r.ok)throw Error(data.error);updateLive(data);}catch(e){el('liveStatus').textContent=String(e);}}
 async function stopLive(){try{const r=await post('live/stop',{});updateLive(await r.json());}catch(e){el('liveStatus').textContent=String(e);}}
