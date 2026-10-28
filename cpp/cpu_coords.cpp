@@ -1,5 +1,8 @@
 #include "cpu_coords.hpp"
 #include <opencv2/core/hal/intrin.hpp>
+#if CV_NEON
+#include <arm_neon.h>
+#endif
 namespace imaging {
 using namespace cv;
 const char *cpuCoordinateKernel() {
@@ -26,6 +29,33 @@ void prepareCoordinates(Mat &flow, Mat &coords, Mat &invalid, float scale, bool 
       int x = 0;
 #if CV_SIMD128
       if (vectorize) {
+#if CV_NEON
+        const auto factor = vdupq_n_f32(scale), row = vdupq_n_f32(float(y));
+        const auto limit = vdupq_n_f32(3600.f);
+        for (; x + 16 <= flow.cols; x += 16) {
+          auto four = [&](int col) {
+            auto values = vld2q_f32(reinterpret_cast<const float *>(f + col));
+            if (scaled) {
+              values.val[0] = vmulq_f32(values.val[0], factor);
+              values.val[1] = vmulq_f32(values.val[1], factor);
+              if (retainScaledFlow)
+                vst2q_f32(reinterpret_cast<float *>(f + col), values);
+            }
+            const float columns[] = {float(col), float(col + 1), float(col + 2), float(col + 3)};
+            float32x4x2_t positions;
+            positions.val[0] = vaddq_f32(values.val[0], vld1q_f32(columns));
+            positions.val[1] = vaddq_f32(values.val[1], row);
+            vst2q_f32(reinterpret_cast<float *>(c + col), positions);
+            auto magnitude = vaddq_f32(vmulq_f32(values.val[0], values.val[0]),
+                                       vmulq_f32(values.val[1], values.val[1]));
+            return vmvnq_u32(vcltq_f32(magnitude, limit));
+          };
+          auto a = four(x), b = four(x + 4), d = four(x + 8), e = four(x + 12);
+          auto lo = vcombine_u16(vmovn_u32(a), vmovn_u32(b));
+          auto hi = vcombine_u16(vmovn_u32(d), vmovn_u32(e));
+          vst1q_u8(bad + x, vcombine_u8(vmovn_u16(lo), vmovn_u16(hi)));
+        }
+#else
         const auto factor = v_setall_f32(scale), row = v_setall_f32(float(y));
         const auto limit = v_setall_f32(3600.f);
         for (; x + 16 <= flow.cols; x += 16) {
@@ -47,6 +77,7 @@ void prepareCoordinates(Mat &flow, Mat &coords, Mat &invalid, float scale, bool 
           auto a = four(x), b = four(x + 4), d = four(x + 8), e = four(x + 12);
           v_store(bad + x, v_pack(v_pack(a, b), v_pack(d, e)));
         }
+#endif
       }
 #else
       (void)vectorize;

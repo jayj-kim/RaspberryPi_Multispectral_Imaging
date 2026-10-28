@@ -305,8 +305,8 @@ python cpp/compare_cpu_remap.py captures_cpp/촬영세션이름 --widths 320 --r
 ## CPU 좌표 생성 SIMD 최적화
 
 국소 리매핑의 `cpu_coords_ms`에 해당하는 흐름 크기 보정·좌표 생성·유효성 판정을
-OpenCV의 128비트 SIMD로 처리합니다. aarch64 라즈베리파이에서는 NEON,
-x86_64 클라우드에서는 SSE2를 사용합니다. SIMD를 지원하지 않는 빌드는 스칼라 루프로 처리합니다.
+128비트 SIMD로 처리합니다. aarch64 라즈베리파이에서는 ARM NEON 명령을 직접 사용하고,
+x86_64 클라우드에서는 OpenCV SSE2를 사용합니다. SIMD를 지원하지 않는 빌드는 스칼라 루프로 처리합니다.
 실시간 합성 상태와 프로필의 `config.local_backend.cpu_coordinate_kernel`에서
 사용하는 커널을 확인할 수 있습니다.
 
@@ -328,3 +328,15 @@ NaN/무한대는 크기 비교에서 제외되며, 유효 흐름에 출력 좌�
 업데이트 후 `ctest --test-dir cpp/build --output-on-failure`로 Pi의 결과 일치를 확인하고,
 CPU·기존 방식·폭 320·목표 30fps·녹화 끔으로 1분 이상 측정하세요.
 역방향 흐름 보간 및 일관성 검사 방식은 이번 변경에서 유지합니다.
+
+
+ARM OpenCV 헤더에 따라 `v_float32x4`의 `*`, `+`, 비교 연산자가 제공되지 않는
+경우가 있어, NEON 경로는 `arm_neon.h`의 명시적 연산으로 구현했습니다.
+이 경로는 aarch64 GCC 14로 파일 전체의 컴파일을 확인했습니다. 실제 Pi 실행·성능은
+업데이트 후 네이티브 빌드와 CTest로 확인해야 합니다.
+개발 환경에 크로스 컴파일러와 OpenCV 헤더가 있으면 다음 검사도 가능합니다.
+
+```bash
+aarch64-linux-gnu-g++ -std=c++17 -O3 -ffp-contract=off -Wall -Wextra -Wpedantic \
+  -I/usr/include/opencv4 -c cpp/cpu_coords.cpp -o /tmp/cpu_coords_aarch64.o
+```
