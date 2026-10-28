@@ -57,6 +57,7 @@ public:
   void stop();
   bool next(int &last, std::string &packet);
 };
-int serve(fs::path output, bool demo, int port, const fs::path &web);
+int serve(fs::path output, bool demo, int port, const fs::path &web,
+          const std::string &defaultBackend = "cpu", bool allowSoftware = false);
 std::string timestamp();
 } // namespace imaging

@@ -1,0 +1,26 @@
+{
+  "test_backend": "Mesa llvmpipe software Vulkan on cloud x86_64",
+  "hardware_gpu_tested": false,
+  "raspberry_pi_gpu_performance": "not measured",
+  "synthetic_cases": {
+    "widths": [
+      320,
+      480,
+      640
+    ],
+    "consistency_checked_and_unchecked": true,
+    "borders_large_flow_nonfinite_values": true,
+    "validation_layer_errors_reported": 0
+  },
+  "provided_session_output_comparison": {
+    "frames": 193,
+    "mean_absolute_pixel_difference": 0.0,
+    "p95_frame_mean_difference": 0.0,
+    "max_channel_difference": 0.0,
+    "median_psnr_db": null,
+    "note": "Agreement between implementations, not a ground-truth registration accuracy metric. MJPEG quantization is included."
+  },
+  "notes": [
+    "Software Vulkan is used only to validate execution and correctness, not to claim GPU acceleration."
+  ]
+}

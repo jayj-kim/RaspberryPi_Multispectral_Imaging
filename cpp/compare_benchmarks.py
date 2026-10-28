@@ -119,6 +119,7 @@ def main():
     parser.add_argument('--output',type=Path,default=ROOT/'benchmarks'/time.strftime('%Y%m%d_%H%M%S'))
     parser.add_argument('--flow-width',type=int,choices=[320,480,640],default=320)
     parser.add_argument('--threads',type=int,default=2)
+    parser.add_argument('--cpp-backend',choices=['cpu','vulkan','auto'],default='cpu')
     parser.add_argument('--stride',type=int,default=1)
     parser.add_argument('--repeat',type=int,default=3)
     args=parser.parse_args()
@@ -138,7 +139,7 @@ def main():
             else:
                 subprocess.run([str(args.cpp.resolve()),'--benchmark-session',str(args.session.resolve()),
                     '--settings',str(settings.resolve()),'--report',str(report.resolve()),
-                    '--cv-threads',str(args.threads),'--stride',str(args.stride)],check=True,stdout=subprocess.DEVNULL)
+                    '--cv-threads',str(args.threads),'--stride',str(args.stride),'--backend',args.cpp_backend],check=True,stdout=subprocess.DEVNULL)
                 result=json.loads(report.read_text())
                 if result['config']['opencv']!=cv2.__version__:
                     raise RuntimeError(f'OpenCV mismatch: Python {cv2.__version__}, C++ {result["config"]["opencv"]}; comparison stopped')
@@ -149,6 +150,7 @@ def main():
     comparison={'host_machine':platform.machine(),'opencv':cv2.__version__,'threads':args.threads,
         'flow_width':args.flow_width,'stride':args.stride,'repeat':args.repeat,'opencv_build_match':True,
         'median_run_mean_ms':means,'cpp_speedup':means['python']/means['cpp'],
+        'cpp_backend':results['cpp'][-1]['config'].get('local_backend'),
         'cpu_pipeline_capacity_fps':{key:1000/value for key,value in means.items()},
         'output_comparison':output_difference(results['python'][-1]['video'],results['cpp'][-1]['video']),
         'notes':['Not a camera/browser end-to-end fps measurement.',

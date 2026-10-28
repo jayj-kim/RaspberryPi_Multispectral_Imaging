@@ -6,7 +6,8 @@ Python 프로그램은 비교 기준으로 그대로 둡니다. C++ 실행 파�
 브라우저 화면은 기존 기능을 유지한 정적 HTML/JavaScript입니다.
 Python은 선택적인 비교 실행기와 HTTP 검증 도구에서만 사용합니다.
 
-현재 백엔드는 **CPU OpenCV**입니다. Vulkan Compute는 아직 구현하지 않았습니다.
+기본 백엔드는 **CPU OpenCV**이며, 실시간 국소 리매핑에 **Vulkan Compute**를 선택할 수 있습니다.
+GPU 장치 확인·설치·측정 방법은 아래 Vulkan 절을 참고하세요.
 
 ## Raspberry Pi 5 빌드·실행
 
@@ -127,10 +128,96 @@ sudo apt install -y python3-opencv python3-numpy python3-flask
 - 같은 파일명으로 후처리를 반복하면 합성·진단은 덮어씁니다. 원본 AVI/CSV는 바꾸지 않습니다.
 - Pi 하드웨어 동작과 발열·스로틀링에 따른 성능은 Pi에서 측정해야 합니다.
 
-## Vulkan 확장 방향
+## Vulkan Compute 병렬 처리
 
-OpenCV DIS는 이 구현에서 CPU 연산입니다. Vulkan 옵션을 켜는 것만으로 GPU로 옮겨지지 않습니다.
-Pi의 Mesa V3DV/Vulkan Compute 지원 상태를 먼저 확인하고, C++ 계측에서 남은 병목에 맞춰
-흐름 확대·좌표 생성·유효성 검사·리매핑·RGB 합성을 compute shader로 묶는 경로를 검토합니다.
-GPU 데이터 전달/동기화와 결과 회수까지 포함해 비교해야 하며, 정확도와 전력·발열도 함께 확인합니다.
-CPU C++ 측정 전부터 GPU 향상 폭을 보장하지 않습니다.
+### Pi 5 설치·빌드
+
+```bash
+sudo apt update
+sudo apt install -y libvulkan-dev glslang-tools mesa-vulkan-drivers vulkan-tools
+cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release -DIMAGING_ENABLE_VULKAN=ON
+cmake --build cpp/build -j 2
+./cpp/build/imaging_cpp --vulkan-info
+./cpp/build/vulkan_test
+./cpp/build/imaging_cpp --backend vulkan --cv-threads 2
+```
+
+CMake에 `Vulkan compute backend enabled`가 표시되어야 합니다.
+`--vulkan-info`의 `compiled`가 true이고, compute 지원 장치의 `software`가 false인지 확인하세요.
+Pi의 하드웨어 장치명은 보통 V3D 계열입니다. llvmpipe/lavapipe는 CPU 소프트웨어 드라이버이며
+기본 GPU 선택에서 제외합니다. `vulkan_test`는 선택 가능한 하드웨어가 없으면 종료 코드 77로
+검사를 건너뜁니다. 건너뜀은 GPU 검증 성공이 아닙니다.
+
+브라우저 `http://127.0.0.1:8001`에서 실시간 백엔드 **Vulkan GPU**를 선택하고 시작합니다.
+CPU/자동 선택도 가능하며 설정 변경은 중지 후 재시작해야 반영됩니다.
+실제 백엔드, 장치명, 소프트웨어 여부가 화면과 계측 JSON에 표시됩니다.
+초기화 또는 디스패치 실패는 CPU로 전환하고 경고합니다. 일부 실패 프레임은 느릴 수 있습니다.
+드라이버 자체가 멈춘 경우에는 정상적인 자동 복구를 보장하지 않습니다.
+
+하드웨어가 안 보이면 `vulkaninfo --summary`, `ls -l /dev/dri`, `id` 결과로
+드라이버와 render 장치 접근 권한을 확인하세요. headless 실행에서 surface/DISPLAY 경고만으로
+compute 실패를 단정하지 마세요. 셰이더는 빌드 시 SPIR-V로 컴파일해 실행 파일에 포함하므로
+실행 시 별도 셰이더 경로나 Python은 필요하지 않습니다.
+
+### GPU로 옮긴 범위
+
+- 축소 DIS 흐름을 원본 크기로 확대하고 픽셀별 좌표 생성
+- 흐름 유효성·최대 이동 검사와 원본 영상 리매핑
+- 검사 프레임에서 역방향 흐름 확대·왕복 일관성 검사
+
+Vulkan 1.0 storage buffer와 8×8 workgroup을 사용합니다.
+영상 입력·DIS/ORB·전역 영상 변환·CLAHE·RGB 합성·JPEG는 여전히 CPU입니다.
+이 단계는 실시간 경로만 지원하며 기존 후처리 경로는 CPU로 유지합니다.
+CPU와 같은 1/32 보간 좌표 양자화, border 처리, 흐름 제한과 검사 임계값을 사용합니다.
+드라이버별 부동소수점 차이는 있을 수 있으므로 Pi에서 `vulkan_test`를 실행하세요.
+
+입력·출력 버퍼와 pipeline은 프레임마다 재생성하지 않습니다.
+Host-visible 메모리에 입력을 패킹하고 명령을 제출한 뒤 fence로 완료를 기다려 결과를 읽습니다.
+메모리 종류에 따라 flush/invalidate를 수행하고 host/compute barrier를 사용합니다.
+현재 한 프레임씩 동기 처리하며 GPU/CPU 이중 버퍼 비동기 파이프라인은 아직 없습니다.
+
+### CPU와 비교 측정
+
+동일 장면·계산 폭 320·목표 30fps·스레드 2개·원본 녹화 끄기로 CPU와 Vulkan을 각각 60초 측정합니다.
+이전 JSON은 다음 실행 전에 다운로드하세요. 계측 JSON의 `config.local_backend.actual`이
+`vulkan`이고 `device.software`가 false일 때만 실제 GPU 결과입니다.
+자동 선택이 CPU로 돌아간 결과를 GPU 성능으로 해석하지 마세요.
+
+`local_warp_ms`는 GPU 경로에서 패킹·버퍼 갱신·제출/대기·결과 읽기와 검사 커널 전체를 포함합니다.
+`consistency_ms`는 GPU 검사도 이 항목에 합쳐지므로 0일 수 있습니다.
+추가 `gpu_pack_ms`, `gpu_upload_ms`, `gpu_submit_wait_ms`, `gpu_download_ms`는 하위 계측이며
+상위 `local_warp_ms`에 다시 더하지 않습니다.
+`gpu_kernel_ms`는 지원 장치의 timestamp query 결과이며 제출/대기 시간과도 겹칩니다.
+미지원 시 0과 `timestamp_supported: false`가 표시됩니다.
+GPU 커널만 빨라져도 데이터 이동·동기화 때문에 전체 처리량이 좋아지지 않을 수 있습니다.
+
+저장 영상으로 동일 입력 비교도 할 수 있습니다.
+
+```bash
+./cpp/build/imaging_cpp --benchmark-session captures/세션이름 --backend cpu --report benchmarks/cpu.json --cv-threads 2
+./cpp/build/imaging_cpp --benchmark-session captures/세션이름 --backend vulkan --report benchmarks/vulkan.json --cv-threads 2
+```
+
+명시한 Vulkan 벤치마크가 CPU로 전환되면 실제 백엔드를 기록한 보고서를 남기고 오류로 종료합니다.
+CPU 대 Python 비교 도구는 `--cpp-backend vulkan`도 지원합니다.
+
+### 검증 범위
+
+클라우드에는 실제 GPU가 없어 Mesa llvmpipe 소프트웨어 Vulkan으로 실행·일치도를 검사했습니다.
+320/480/640, 검사 켜기/끄기, 경계·큰 흐름·비정상 값, Vulkan validation layer,
+웹 MJPEG·계측·CPU 전환을 검증했습니다. 제공된 193프레임에서도 CPU와 Vulkan 소프트웨어
+출력을 비교했습니다. 이는 Pi GPU의 성능이나 하드웨어 실행 검증을 뜻하지 않습니다.
+Pi 하드웨어 처리 속도는 별도 측정이 필요하며 30fps를 보장하지 않습니다.
+
+개발 검증에서만 소프트웨어 Vulkan을 허용하려면 명시적으로 다음을 사용합니다.
+
+```bash
+IMAGING_TEST_ALLOW_SOFTWARE_VULKAN=1 ./cpp/build/vulkan_test
+python3 cpp/test_vulkan_http.py --software
+python3 cpp/test_vulkan_http.py --fallback
+```
+
+HTTP 소프트웨어 검사기는 서버를 `--allow-software-vulkan`으로 실행합니다.
+이 옵션은 실제 Pi 성능 측정에서 사용하지 마세요.
+CPU만 빌드하려면 `-DIMAGING_ENABLE_VULKAN=OFF`를 사용합니다. Vulkan 의존성이 없는 경우에도
+CPU stub과 명시적 fallback 상태로 빌드되며, `vulkan_test`는 생성되지 않습니다.

@@ -209,6 +209,8 @@ json Live::measurement() const {
 void Live::start(json body) {
   std::lock_guard<std::mutex> operation(control);
   int width = body.value("flow_width", 320), fps = body.value("target_fps", 5);
+  std::string backend = body.value("compute_backend", std::string("cpu"));
+  require(backend == "cpu" || backend == "auto" || backend == "vulkan", "Invalid compute backend");
   require(width == 320 || width == 480 || width == 640, "Invalid calculation width");
   require(fps == 5 || fps == 10 || fps == 15 || fps == 20 || fps == 30, "Invalid target fps");
   registration(fallback(body, "points", nullptr), fallback(body, "adjustments", nullptr));
@@ -234,11 +236,9 @@ void Live::start(json body) {
     halt = false;
     jpeg.clear();
     sequence = 0;
-    json c = {{"flow_width", width},
-              {"target_fps", fps},
-              {"implementation", "C++"},
-              {"opencv", CV_VERSION},
-              {"opencv_threads", cv::getNumThreads()},
+    json c = {{"flow_width", width},  {"compute_backend", backend},
+              {"target_fps", fps},    {"implementation", "C++"},
+              {"opencv", CV_VERSION}, {"opencv_threads", cv::getNumThreads()},
               {"demo", rig.demo}};
     profile = Profile(c);
     metrics = {{"running", true},
@@ -287,6 +287,11 @@ void Live::run(json config) {
       previous = seq[0];
       Images images = {frames[0].image, frames[1].image, frames[2].image};
       auto result = pipeline.process(images, begin);
+      if (result.backend.contains("warning") && !result.backend["warning"].is_null()) {
+        if (!result.warning.empty())
+          result.warning += "; ";
+        result.warning += result.backend["warning"].get<std::string>();
+      }
       double tick = now();
       std::vector<uchar> encoded;
       require(cv::imencode(".jpg", result.image, encoded, {cv::IMWRITE_JPEG_QUALITY, 75}),
@@ -306,6 +311,7 @@ void Live::run(json config) {
               newest = std::max({frames[0].stamp, frames[1].stamp, frames[2].stamp});
       {
         std::lock_guard<std::mutex> guard(mutex);
+        profile.setBackend(result.backend);
         profile.record(result.stages, result.stages["global_ms"].get<double>() > 0, result.checked,
                        recording);
         jpeg = std::move(encoded);
@@ -318,6 +324,7 @@ void Live::run(json config) {
         metrics["camera_skew_ms"] = (newest - oldest) / 1e6;
         metrics["skipped_cam1"] = skipped;
         metrics["global_valid"] = result.globalValid;
+        metrics["backend"] = result.backend;
         metrics["consistency"] = result.consistency < 0 ? json(nullptr) : json(result.consistency);
         metrics["consistency_checked"] = result.checked;
         if (result.checked)
@@ -369,7 +376,8 @@ static std::atomic<bool> interrupted{false};
 static void interrupt(int) {
   interrupted = true;
 }
-int serve(fs::path output, bool demo, int port, const fs::path &web) {
+int serve(fs::path output, bool demo, int port, const fs::path &web,
+          const std::string &defaultBackend, bool allowSoftware) {
   Rig rig(output, demo);
   Live live(rig);
   httplib::Server server;
@@ -383,6 +391,9 @@ int serve(fs::path output, bool demo, int port, const fs::path &web) {
   auto mark = page.find("__DEMO__");
   if (mark != std::string::npos)
     page.replace(mark, 8, demo ? " — DEMO" : "");
+  auto backendMark = page.find("__DEFAULT_BACKEND__");
+  if (backendMark != std::string::npos)
+    page.replace(backendMark, 19, defaultBackend);
   auto reply = [](httplib::Response &r, const json &j, int status = 200) {
     r.status = status;
     r.set_content(j.dump(), "application/json; charset=utf-8");
@@ -435,6 +446,7 @@ int serve(fs::path output, bool demo, int port, const fs::path &web) {
     }
     reply(r, data);
   });
+  server.Get("/api/vulkan", [&](const auto &, auto &r) { reply(r, vulkanInfo()); });
   server.Get("/api/sessions", [&](const auto &, auto &r) {
     std::vector<std::string> names;
     if (fs::exists(rig.output))
@@ -458,7 +470,10 @@ int serve(fs::path output, bool demo, int port, const fs::path &web) {
   server.Post("/api/live/start", [&](const auto &q, auto &r) {
     std::unique_lock<std::mutex> guard(job, std::try_to_lock);
     require(guard.owns_lock(), "Offline composition is running");
-    live.start(json::parse(q.body));
+    auto config = json::parse(q.body);
+    config["compute_backend"] = config.value("compute_backend", defaultBackend);
+    config["allow_software_vulkan"] = allowSoftware;
+    live.start(config);
     reply(r, live.status());
   });
   server.Post("/api/live/stop", [&](const auto &, auto &r) {

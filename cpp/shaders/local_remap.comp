@@ -1,0 +1,74 @@
+#version 450
+// Portable Vulkan 1.0 compute: no 8-bit storage or subgroup extensions required.
+layout(local_size_x=8, local_size_y=8, local_size_z=1) in;
+layout(std430,binding=0) readonly buffer InputPixels { uint pixels[]; };
+layout(std430,binding=1) readonly buffer InputFlows { vec2 flows[]; };
+layout(std430,binding=2) writeonly buffer OutputPixels { uint result[]; };
+layout(push_constant) uniform Parameters { uint width; uint height; uint lowWidth; uint lowHeight; uint check; } p;
+
+bool finite2(vec2 v) { return !any(isnan(v)) && !any(isinf(v)); }
+// Match cv::resize INTER_LINEAR's half-pixel coordinates and edge replication.
+vec2 fullFlow(uint plane,ivec2 pixel) {
+    vec2 at=(vec2(pixel)+vec2(.5))*vec2(p.lowWidth,p.lowHeight)/vec2(p.width,p.height)-vec2(.5);
+    ivec2 a=ivec2(floor(at)); vec2 t=fract(at);
+    ivec2 lo=clamp(a,ivec2(0),ivec2(p.lowWidth-1,p.lowHeight-1));
+    ivec2 hi=clamp(a+ivec2(1),ivec2(0),ivec2(p.lowWidth-1,p.lowHeight-1));
+    uint base=plane*p.lowWidth*p.lowHeight;
+    vec2 f00=flows[base+uint(lo.y)*p.lowWidth+uint(lo.x)];
+    vec2 f10=flows[base+uint(lo.y)*p.lowWidth+uint(hi.x)];
+    vec2 f01=flows[base+uint(hi.y)*p.lowWidth+uint(lo.x)];
+    vec2 f11=flows[base+uint(hi.y)*p.lowWidth+uint(hi.x)];
+    return mix(mix(f00,f10,t.x),mix(f01,f11,t.x),t.y)*(float(p.width)/float(p.lowWidth));
+}
+uint grayAt(ivec2 xy,uint camera) {
+    if(any(lessThan(xy,ivec2(0)))||xy.x>=int(p.width)||xy.y>=int(p.height))return 0u;
+    return (pixels[uint(xy.y)*p.width+uint(xy.x)]>>(8u*camera))&255u;
+}
+// cv::remap INTER_LINEAR uses a 1/32 subpixel interpolation table.
+void remapPosition(vec2 xy,out ivec2 origin,out ivec2 t) {
+    vec2 quant=roundEven(xy*32.0);
+    origin=ivec2(floor(quant/32.0));
+    t=ivec2(quant-vec2(origin)*32.0);
+}
+uint remapGray(vec2 xy,uint camera) {
+    ivec2 a,t;remapPosition(xy,a,t);
+    uint sx=uint(t.x),sy=uint(t.y);
+    uint sum=grayAt(a,camera)*(32u-sx)*(32u-sy)+
+             grayAt(a+ivec2(1,0),camera)*sx*(32u-sy)+
+             grayAt(a+ivec2(0,1),camera)*(32u-sx)*sy+
+             grayAt(a+ivec2(1,1),camera)*sx*sy;
+    return min(255u,(sum+512u)>>10u);
+}
+vec2 backAt(uint plane,ivec2 xy) {
+    if(any(lessThan(xy,ivec2(0)))||xy.x>=int(p.width)||xy.y>=int(p.height))return vec2(1000);
+    return fullFlow(plane,xy);
+}
+vec2 remapBack(vec2 xy,uint plane) {
+    ivec2 a,t;remapPosition(xy,a,t);vec2 weight=vec2(t)/32.0;
+    return mix(mix(backAt(plane,a),backAt(plane,a+ivec2(1,0)),weight.x),
+               mix(backAt(plane,a+ivec2(0,1)),backAt(plane,a+ivec2(1,1)),weight.x),weight.y);
+}
+void main() {
+    uvec2 id=gl_GlobalInvocationID.xy;
+    if(id.x>=p.width||id.y>=p.height)return;
+    uint index=id.y*p.width+id.x;
+    uint reference=pixels[index]&255u;
+    uint packed=0u;bool allValid=true;
+    for(uint cam=0u;cam<2u;cam++) {
+        vec2 f=fullFlow(cam,ivec2(id)),xy=vec2(id)+f;
+        bool usable=finite2(f)&&finite2(xy)&&dot(f,f)<3600.0;
+        uint source=(pixels[index]>>(8u*(cam+1u)))&255u;
+        uint mapped=usable?remapGray(xy,cam+1u):source;
+        packed|=mapped<<(8u*cam);
+        if(p.check!=0u) {
+            bool valid=usable && xy.x>=0 && xy.x<float(p.width-1u) &&
+                       xy.y>=0 && xy.y<float(p.height-1u) && reference>2u && mapped>2u;
+            if(valid) {
+                vec2 error=f+remapBack(xy,cam+2u);
+                valid=finite2(error)&&dot(error,error)<2.25;
+            }
+            allValid=allValid&&valid;
+        }
+    }
+    result[index]=packed|((p.check==0u||allValid)?0x00ff0000u:0u);
+}

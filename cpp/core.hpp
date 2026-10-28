@@ -1,4 +1,5 @@
 #pragma once
+#include "vulkan_remap.hpp"
 #include <array>
 #include <chrono>
 #include <deque>
@@ -85,9 +86,13 @@ class LocalRefiner {
   bool live;
   int count = 0;
   double lastConsistency = -1;
+  std::unique_ptr<VulkanRemapper> gpu;
+  json backendInfo;
 
 public:
-  explicit LocalRefiner(int width = 640, bool live = false);
+  explicit LocalRefiner(int width = 640, bool live = false, const std::string &backend = "cpu",
+                        bool allowSoftware = false);
+  json backendStatus() const;
   Refined refine(const Images &);
 };
 std::vector<Matrices> smoothPath(const std::vector<Matrices> &, int window);
@@ -100,6 +105,7 @@ public:
   explicit Profile(json config = json::object());
   void record(const json &, bool refresh, bool check, bool recording = false);
   json summary() const;
+  void setBackend(const json &);
 };
 struct PipelineResult {
   cv::Mat image;
@@ -107,6 +113,7 @@ struct PipelineResult {
   bool checked = false;
   double consistency = -1;
   bool globalValid = false;
+  json backend;
   std::string warning;
 };
 class LivePipeline {

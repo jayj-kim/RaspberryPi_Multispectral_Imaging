@@ -403,20 +403,41 @@ std::pair<Point2d, json> GlobalStabilizer::update(const Mat &g) {
            {"reason", reason.empty() ? json(nullptr) : json(reason)},
            {"translation_px", {correction.x, correction.y}}}};
 }
-LocalRefiner::LocalRefiner(int w, bool l) : width(w), live(l) {
+LocalRefiner::LocalRefiner(int w, bool l, const std::string &backend, bool allowSoftware)
+    : width(w), live(l) {
   require(w == 320 || w == 480 || w == 640, "Invalid flow width");
   engine = DISOpticalFlow::create(l ? DISOpticalFlow::PRESET_FAST : DISOpticalFlow::PRESET_MEDIUM);
   clahe = createCLAHE(2, Size(8, 8));
+  require(backend == "cpu" || backend == "vulkan" || backend == "auto", "Invalid compute backend");
+  backendInfo = {{"requested", backend}, {"actual", "cpu"}, {"warning", nullptr}};
+  if (backend != "cpu") {
+    require(live, "Vulkan currently supports the realtime path only");
+    try {
+      gpu = std::make_unique<VulkanRemapper>(width, allowSoftware);
+      backendInfo["actual"] = "vulkan";
+      backendInfo["device"] = gpu->info();
+    } catch (const std::exception &e) {
+      backendInfo["warning"] = std::string("Vulkan unavailable; CPU fallback: ") + e.what();
+    }
+  }
 }
+json LocalRefiner::backendStatus() const {
+  return backendInfo;
+}
+
 Refined LocalRefiner::refine(const Images &g) {
   Refined r;
   r.channels[0] = g[0];
   r.checked = !live || count % 5 == 0;
+  r.reports = json::array();
   r.timings = {{"local_prep_ms", 0.},
                {"dis_forward_ms", 0.},
                {"dis_reverse_ms", 0.},
                {"local_warp_ms", 0.},
                {"consistency_ms", 0.}};
+  for (const std::string key :
+       {"gpu_pack_ms", "gpu_upload_ms", "gpu_submit_wait_ms", "gpu_download_ms", "gpu_kernel_ms"})
+    r.timings[key] = 0.;
   Images small;
   double tick = now();
   for (int i = 0; i < 3; i++) {
@@ -428,6 +449,42 @@ Refined LocalRefiner::refine(const Images &g) {
     clahe->apply(a, small[i]);
   }
   r.timings["local_prep_ms"] = ms(tick);
+  if (gpu) {
+    try {
+      std::array<Mat, 2> forward, backward;
+      for (int i = 0; i < 2; i++) {
+        tick = now();
+        engine->calc(small[0], small[i + 1], forward[i]);
+        r.timings["dis_forward_ms"] = r.timings["dis_forward_ms"].get<double>() + ms(tick);
+        if (r.checked) {
+          tick = now();
+          engine->calc(small[i + 1], small[0], backward[i]);
+          r.timings["dis_reverse_ms"] = r.timings["dis_reverse_ms"].get<double>() + ms(tick);
+        }
+      }
+      tick = now();
+      auto result = gpu->apply(g, forward, backward, r.checked);
+      r.timings["local_warp_ms"] = ms(tick);
+      r.channels = result.channels;
+      r.validity = result.validity;
+      for (auto it = result.timings.begin(); it != result.timings.end(); ++it)
+        r.timings[it.key()] = it.value();
+      if (r.checked)
+        lastConsistency = double(countNonZero(r.validity)) / (640 * 480);
+      r.consistency = lastConsistency;
+      count++;
+      return r;
+    } catch (const std::exception &e) {
+      gpu.reset();
+      if (backendInfo.contains("device")) {
+        backendInfo["last_failed_device"] = backendInfo["device"];
+        backendInfo.erase("device");
+      }
+      backendInfo["actual"] = "cpu";
+      backendInfo["warning"] = std::string("Vulkan dispatch failed; CPU fallback: ") + e.what();
+      // Recompute this frame on CPU; do not publish a partial GPU result.
+    }
+  }
   Mat validAll(480, 640, CV_8U, Scalar(255));
   r.reports = json::array();
   for (int cam = 1; cam < 3; cam++) {
@@ -614,6 +671,9 @@ void Profile::record(const json &stage, bool refresh, bool check, bool recording
   g["sum"] = g["sum"].get<double>() + stage["total_ms"].get<double>();
   g["max"] = std::max(g["max"].get<double>(), stage["total_ms"].get<double>());
 }
+void Profile::setBackend(const json &info) {
+  config["local_backend"] = info;
+}
 static double percentile(std::vector<double> v, double p) {
   if (v.empty())
     return 0;
@@ -661,7 +721,9 @@ json Profile::summary() const {
 }
 LivePipeline::LivePipeline(json c)
     : h(registration(fallback(c, "points", nullptr), fallback(c, "adjustments", nullptr))),
-      config(c), temporal(h, "responsive"), local(c.value("flow_width", 320), true) {}
+      config(c), temporal(h, "responsive"),
+      local(c.value("flow_width", 320), true, c.value("compute_backend", std::string("cpu")),
+            c.value("allow_software_vulkan", false)) {}
 PipelineResult LivePipeline::process(const Images &bgr, double inputTime) {
   double begin = now(), tick = now();
   PipelineResult r;
@@ -708,11 +770,13 @@ PipelineResult LivePipeline::process(const Images &bgr, double inputTime) {
   r.stages["jpeg_ms"] = 0.;
   double sum = 0;
   for (auto it = r.stages.begin(); it != r.stages.end(); ++it)
-    sum += it.value().get<double>();
+    if (it.key().rfind("gpu_", 0) != 0)
+      sum += it.value().get<double>();
   double total = ms(begin);
   r.stages["other_ms"] = std::max(0., total - sum);
   r.stages["total_ms"] = total;
   r.globalValid = globalValid;
+  r.backend = local.backendStatus();
   return r;
 }
 static int nearest(const std::vector<int64_t> &a, int64_t stamp) {
@@ -1139,6 +1203,7 @@ json benchmark(const fs::path &folder, const json &config, const fs::path &repor
     double elapsed = ms(tick);
     r.stages["jpeg_ms"] = elapsed;
     r.stages["total_ms"] = r.stages["total_ms"].get<double>() + elapsed;
+    profile.setBackend(r.backend);
     profile.record(r.stages, r.stages["global_ms"].get<double>() > 0, r.checked);
     writer.write(r.image);
   }
