@@ -1,4 +1,5 @@
 #include "core.hpp"
+#include "cpu_coords.hpp"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -416,8 +417,11 @@ LocalRefiner::LocalRefiner(int w, bool l, const std::string &backend, bool allow
   engine = DISOpticalFlow::create(l ? DISOpticalFlow::PRESET_FAST : DISOpticalFlow::PRESET_MEDIUM);
   clahe = createCLAHE(2, Size(8, 8));
   require(backend == "cpu" || backend == "vulkan" || backend == "auto", "Invalid compute backend");
-  backendInfo = {
-      {"requested", backend}, {"actual", "cpu"}, {"cpu_remap", cpuRemap}, {"warning", nullptr}};
+  backendInfo = {{"requested", backend},
+                 {"actual", "cpu"},
+                 {"cpu_remap", cpuRemap},
+                 {"cpu_coordinate_kernel", cpuCoordinateKernel()},
+                 {"warning", nullptr}};
   if (backend != "cpu") {
     require(live, "Vulkan currently supports the realtime path only");
     try {
@@ -518,21 +522,7 @@ Refined LocalRefiner::refine(const Images &g) {
     }
     addTime("cpu_flow_resize_ms", subTick);
     subTick = now();
-    parallel_for_(Range(0, 480), [&](const Range &range) {
-      for (int y = range.start; y < range.end; y++) {
-        auto *f = flow.ptr<Vec2f>(y);
-        auto *c = coords.ptr<Vec2f>(y);
-        auto *bad = invalid.ptr<uchar>(y);
-        for (int x = 0; x < 640; x++) {
-          if (width != 640)
-            f[x] *= 640.f / width;
-          c[x] = f[x] + Vec2f(float(x), float(y));
-          bad[x] = !(std::isfinite(c[x][0]) && std::isfinite(c[x][1]) && f[x].dot(f[x]) < 3600)
-                       ? 255
-                       : 0;
-        }
-      }
-    });
+    prepareCoordinates(flow, coords, invalid, 640.f / width, r.checked);
     addTime("cpu_coords_ms", subTick);
     if (fixedRemap) {
       subTick = now();

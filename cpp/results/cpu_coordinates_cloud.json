@@ -1,0 +1,272 @@
+{
+  "environment": "Cloud x86_64; not Raspberry Pi performance. OpenCV 4.10.0, two threads. Alternating order, three runs, same 193-frame input; timings exclude video decoding/writing.",
+  "widths": {
+    "320": {
+      "runs": {
+        "before": [
+          {
+            "total_ms": 8.720400085234786,
+            "local_warp_ms": 2.1201919894434815,
+            "global_warp_ms": 1.3925576225680762,
+            "consistency_ms": 0.43610044156864997,
+            "cpu_coords_ms": 0.9913142449148198,
+            "cpu_flow_resize_ms": 0.2823299043503791,
+            "cpu_image_remap_ms": 0.8176541487433071
+          },
+          {
+            "total_ms": 8.559491446926296,
+            "local_warp_ms": 2.1173808409583486,
+            "global_warp_ms": 1.4577606064236495,
+            "consistency_ms": 0.4557257872410775,
+            "cpu_coords_ms": 0.9515569946086815,
+            "cpu_flow_resize_ms": 0.2928441118320792,
+            "cpu_image_remap_ms": 0.8433761918917918
+          },
+          {
+            "total_ms": 8.020062957528237,
+            "local_warp_ms": 1.886095723362969,
+            "global_warp_ms": 1.2983414415314056,
+            "consistency_ms": 0.4110637499329738,
+            "cpu_coords_ms": 0.8599722873731616,
+            "cpu_flow_resize_ms": 0.2538409521258337,
+            "cpu_image_remap_ms": 0.7457765159028411
+          }
+        ],
+        "after": [
+          {
+            "total_ms": 7.593842186268259,
+            "local_warp_ms": 1.342272819319407,
+            "global_warp_ms": 1.3258026808235879,
+            "consistency_ms": 0.4071915265662841,
+            "cpu_coords_ms": 0.25307936707673784,
+            "cpu_flow_resize_ms": 0.3072892181119235,
+            "cpu_image_remap_ms": 0.7565441434982201
+          },
+          {
+            "total_ms": 7.867280665061813,
+            "local_warp_ms": 1.3842535532564804,
+            "global_warp_ms": 1.274330622378484,
+            "consistency_ms": 0.44000400534872475,
+            "cpu_coords_ms": 0.2582711274257274,
+            "cpu_flow_resize_ms": 0.31764707971965533,
+            "cpu_image_remap_ms": 0.7730744306134008
+          },
+          {
+            "total_ms": 7.096666080039366,
+            "local_warp_ms": 1.2417051861546575,
+            "global_warp_ms": 1.3065806542533422,
+            "consistency_ms": 0.4005989148162313,
+            "cpu_coords_ms": 0.21969139348545874,
+            "cpu_flow_resize_ms": 0.27632882449053914,
+            "cpu_image_remap_ms": 0.7222080584084479
+          }
+        ]
+      },
+      "means": {
+        "before": {
+          "total_ms": 8.433318163229773,
+          "local_warp_ms": 2.041222851254933,
+          "global_warp_ms": 1.3828865568410438,
+          "consistency_ms": 0.4342966595809004,
+          "cpu_coords_ms": 0.9342811756322209,
+          "cpu_flow_resize_ms": 0.27633832276943066,
+          "cpu_image_remap_ms": 0.8022689521793134
+        },
+        "after": {
+          "total_ms": 7.519262977123146,
+          "local_warp_ms": 1.3227438529101816,
+          "global_warp_ms": 1.3022379858184714,
+          "consistency_ms": 0.4159314822437467,
+          "cpu_coords_ms": 0.24368062932930798,
+          "cpu_flow_resize_ms": 0.300421707440706,
+          "cpu_image_remap_ms": 0.7506088775066896
+        }
+      },
+      "processing_time_reduction_percent": 10.83861854153696,
+      "output_comparison": {
+        "frames": 193,
+        "max_pixel_difference": 0,
+        "mean_pixel_difference": 0.0
+      }
+    },
+    "480": {
+      "runs": {
+        "before": [
+          {
+            "total_ms": 11.032288260236221,
+            "local_warp_ms": 2.0252364893360904,
+            "global_warp_ms": 1.5393085051518358,
+            "consistency_ms": 0.48828448936856533,
+            "cpu_coords_ms": 0.7806521805910148,
+            "cpu_flow_resize_ms": 0.3749320104806758,
+            "cpu_image_remap_ms": 0.8424368884237644
+          },
+          {
+            "total_ms": 8.91939299472529,
+            "local_warp_ms": 1.5698614897314171,
+            "global_warp_ms": 1.2854319947051562,
+            "consistency_ms": 0.3823737234462045,
+            "cpu_coords_ms": 0.5754436383637206,
+            "cpu_flow_resize_ms": 0.28980711717753016,
+            "cpu_image_remap_ms": 0.6838015694309898
+          },
+          {
+            "total_ms": 10.28331901595285,
+            "local_warp_ms": 1.8231796062498185,
+            "global_warp_ms": 1.3173718934728853,
+            "consistency_ms": 0.41078185634607045,
+            "cpu_coords_ms": 0.7457547287831016,
+            "cpu_flow_resize_ms": 0.31071234601806785,
+            "cpu_image_remap_ms": 0.7421288987546738
+          }
+        ],
+        "after": [
+          {
+            "total_ms": 10.210473313642805,
+            "local_warp_ms": 1.4287003087179557,
+            "global_warp_ms": 1.4977166009439895,
+            "consistency_ms": 0.4625256596363157,
+            "cpu_coords_ms": 0.22357818626063664,
+            "cpu_flow_resize_ms": 0.36890043597947064,
+            "cpu_image_remap_ms": 0.8114212446053762
+          },
+          {
+            "total_ms": 8.732470053067292,
+            "local_warp_ms": 1.1918287501875386,
+            "global_warp_ms": 1.2668452608077712,
+            "consistency_ms": 0.39128392567595544,
+            "cpu_coords_ms": 0.17734529247970018,
+            "cpu_flow_resize_ms": 0.3031601487778739,
+            "cpu_image_remap_ms": 0.6891309680058646
+          },
+          {
+            "total_ms": 10.683660681082829,
+            "local_warp_ms": 1.3982226435163807,
+            "global_warp_ms": 1.2939180266797887,
+            "consistency_ms": 0.41945918083195255,
+            "cpu_coords_ms": 0.2447033991128147,
+            "cpu_flow_resize_ms": 0.3707834201393664,
+            "cpu_image_remap_ms": 0.7546986169550206
+          }
+        ]
+      },
+      "means": {
+        "before": {
+          "total_ms": 10.07833342363812,
+          "local_warp_ms": 1.8060925284391087,
+          "global_warp_ms": 1.380704131109959,
+          "consistency_ms": 0.4271466897202801,
+          "cpu_coords_ms": 0.7006168492459457,
+          "cpu_flow_resize_ms": 0.3251504912254246,
+          "cpu_image_remap_ms": 0.7561224522031427
+        },
+        "after": {
+          "total_ms": 9.875534682597642,
+          "local_warp_ms": 1.3395839008072916,
+          "global_warp_ms": 1.3528266294771831,
+          "consistency_ms": 0.4244229220480746,
+          "cpu_coords_ms": 0.21520895928438383,
+          "cpu_flow_resize_ms": 0.34761466829890364,
+          "cpu_image_remap_ms": 0.7517502765220871
+        }
+      },
+      "processing_time_reduction_percent": 2.012224963353826,
+      "output_comparison": {
+        "frames": 193,
+        "max_pixel_difference": 0,
+        "mean_pixel_difference": 0.0
+      }
+    },
+    "640": {
+      "runs": {
+        "before": [
+          {
+            "total_ms": 12.929614308264485,
+            "local_warp_ms": 1.2817024469845917,
+            "global_warp_ms": 1.2462144095286234,
+            "consistency_ms": 0.3536571224143932,
+            "cpu_coords_ms": 0.4998282817549362,
+            "cpu_flow_resize_ms": 0.005771622435280191,
+            "cpu_image_remap_ms": 0.7469938883777433
+          },
+          {
+            "total_ms": 13.48436877647823,
+            "local_warp_ms": 1.3143298458786337,
+            "global_warp_ms": 1.209997063906872,
+            "consistency_ms": 0.3326522766191703,
+            "cpu_coords_ms": 0.5451865848605868,
+            "cpu_flow_resize_ms": 0.005332946707215903,
+            "cpu_image_remap_ms": 0.7330098457540326
+          },
+          {
+            "total_ms": 13.18511954242298,
+            "local_warp_ms": 1.2905104894092259,
+            "global_warp_ms": 1.1975517500685144,
+            "consistency_ms": 0.32746712243332443,
+            "cpu_coords_ms": 0.5335688031451316,
+            "cpu_flow_resize_ms": 0.0061986752854786475,
+            "cpu_image_remap_ms": 0.7205204625047082
+          }
+        ],
+        "after": [
+          {
+            "total_ms": 13.035232813889069,
+            "local_warp_ms": 0.9980515267941766,
+            "global_warp_ms": 1.2067483936682928,
+            "consistency_ms": 0.3447155318389513,
+            "cpu_coords_ms": 0.2383926384743276,
+            "cpu_flow_resize_ms": 0.004405627650873825,
+            "cpu_image_remap_ms": 0.725433984061578
+          },
+          {
+            "total_ms": 13.14124428742442,
+            "local_warp_ms": 1.0118547232273256,
+            "global_warp_ms": 1.1987411276579145,
+            "consistency_ms": 0.3581987447181204,
+            "cpu_coords_ms": 0.23329789369296472,
+            "cpu_flow_resize_ms": 0.002958813793350388,
+            "cpu_image_remap_ms": 0.7449826651359314
+          },
+          {
+            "total_ms": 12.51561871819657,
+            "local_warp_ms": 0.981757505619595,
+            "global_warp_ms": 1.2084923139596828,
+            "consistency_ms": 0.334334430745196,
+            "cpu_coords_ms": 0.22442186158552935,
+            "cpu_flow_resize_ms": 0.006344175377075481,
+            "cpu_image_remap_ms": 0.7229784203910311
+          }
+        ]
+      },
+      "means": {
+        "before": {
+          "total_ms": 13.199700875721899,
+          "local_warp_ms": 1.2955142607574837,
+          "global_warp_ms": 1.2179210745013367,
+          "consistency_ms": 0.3379255071556293,
+          "cpu_coords_ms": 0.5261945565868849,
+          "cpu_flow_resize_ms": 0.005767748142658247,
+          "cpu_image_remap_ms": 0.7335080655454947
+        },
+        "after": {
+          "total_ms": 12.89736527317002,
+          "local_warp_ms": 0.9972212518803657,
+          "global_warp_ms": 1.2046606117619634,
+          "consistency_ms": 0.3457495691007559,
+          "cpu_coords_ms": 0.23203746458427388,
+          "cpu_flow_resize_ms": 0.004569538940433231,
+          "cpu_image_remap_ms": 0.7311316898628468
+        }
+      },
+      "processing_time_reduction_percent": 2.2904731357053842,
+      "output_comparison": {
+        "frames": 193,
+        "max_pixel_difference": 0,
+        "mean_pixel_difference": 0.0
+      }
+    }
+  },
+  "baseline_commit": "7c11f85",
+  "kernel": "SSE2 128-bit (cloud); Raspberry Pi NEON not measured",
+  "scope": "CPU float remap. Three alternating runs, first five outputs excluded. Video decoding/encoding writes excluded; JPEG preview included."
+}
