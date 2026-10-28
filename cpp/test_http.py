@@ -41,7 +41,8 @@ def main():
                     data=json.loads(request('/api/status')[2])
                     if all(c['error'] is None for c in data['cameras']):break
                     time.sleep(.05)
-                assert request('/api/live/start',{'flow_width':320,'target_fps':10})[0]==200
+                assert request('/api/live/start',{'cpu_remap':'invalid'})[0]==400
+                assert request('/api/live/start',{'flow_width':320,'target_fps':10,'cpu_remap':'fixed'})[0]==200
                 assert request('/api/live/start',{})[0]==400
                 assert request('/api/start',{})[0]==200
                 time.sleep(1)
@@ -50,10 +51,16 @@ def main():
                 assert request('/api/compose',{'session':recorded})[0]==400
                 with urllib.request.urlopen(base+'/live/stream',timeout=10) as stream:
                     assert stream.read(100).startswith(b'--frame\r\nContent-Type: image/jpeg')
+                for _ in range(100):
+                    if json.loads(request('/api/status')[2])['live']['processed']>=8:break
+                    time.sleep(.1)
+                else:raise RuntimeError('Live profiling did not finish warmup')
                 assert request('/api/live/stop',{})[0]==200
                 code,headers,profile=request('/api/live/profile?download=1')
                 assert code==200 and 'attachment' in headers['Content-Disposition']
                 assert json.loads(profile)['outputs_seen']>0
+                assert json.loads(profile)['config']['local_backend']['cpu_remap']=='fixed'
+                assert 'cpu_map_convert_ms' in json.loads(profile)['stages']
                 assert recorded in json.loads(request('/api/sessions')[2])
                 body={'session':recorded,'mapping':[0,1,2],'offsets':[[0,0]]*3}
                 code,headers,image=request('/api/preview',{**body,'raw':0})

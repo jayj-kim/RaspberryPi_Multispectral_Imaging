@@ -211,6 +211,8 @@ void Live::start(json body) {
   int width = body.value("flow_width", 320), fps = body.value("target_fps", 5);
   std::string backend = body.value("compute_backend", std::string("cpu"));
   require(backend == "cpu" || backend == "auto" || backend == "vulkan", "Invalid compute backend");
+  std::string cpuRemap = body.value("cpu_remap", std::string("float"));
+  require(cpuRemap == "float" || cpuRemap == "fixed", "Invalid CPU remap mode");
   require(width == 320 || width == 480 || width == 640, "Invalid calculation width");
   require(fps == 5 || fps == 10 || fps == 15 || fps == 20 || fps == 30, "Invalid target fps");
   registration(fallback(body, "points", nullptr), fallback(body, "adjustments", nullptr));
@@ -236,9 +238,13 @@ void Live::start(json body) {
     halt = false;
     jpeg.clear();
     sequence = 0;
-    json c = {{"flow_width", width},  {"compute_backend", backend},
-              {"target_fps", fps},    {"implementation", "C++"},
-              {"opencv", CV_VERSION}, {"opencv_threads", cv::getNumThreads()},
+    json c = {{"cpu_remap", cpuRemap},
+              {"flow_width", width},
+              {"compute_backend", backend},
+              {"target_fps", fps},
+              {"implementation", "C++"},
+              {"opencv", CV_VERSION},
+              {"opencv_threads", cv::getNumThreads()},
               {"demo", rig.demo}};
     profile = Profile(c);
     metrics = {{"running", true},

@@ -62,32 +62,43 @@ int main() {
         throw std::runtime_error("Identity shortcut changed warp math/output ownership");
     }
     RNG rng(421);
-    for (int width : {320, 480, 640}) {
-      LocalRefiner local(width, true);
-      Images prior, saved;
-      for (int frame = 0; frame < 6; ++frame) {
-        Images images;
-        rng.fill(images[0] = Mat(480, 640, CV_8U), RNG::UNIFORM, 0, 255);
-        GaussianBlur(images[0], images[0], Size(5, 5), 0);
-        Mat move = (Mat_<double>(2, 3) << 1, 0, frame * 3 + 5, 0, 1, -4);
-        warpAffine(images[0], images[1], move, Size(640, 480));
-        images[2] = frame == 3 ? Mat::zeros(480, 640, CV_8U) : images[1].clone();
-        auto actual = local.refine(images);
-        auto expected = reference(images, width, frame % 5 == 0);
-        if (actual.checked != (frame % 5 == 0) ||
-            norm(actual.validity, expected.validity, NORM_INF) != 0)
-          throw std::runtime_error("Validity/cadence mismatch");
-        for (int i = 0; i < 3; ++i) {
-          if (norm(actual.channels[i], expected.channels[i], NORM_INF) != 0)
-            throw std::runtime_error("Output differs from CPU baseline");
-          if (!prior[i].empty() && norm(prior[i], saved[i], NORM_INF) != 0)
-            throw std::runtime_error("Scratch overwrote a previously returned image");
-          prior[i] = actual.channels[i];
-          saved[i] = prior[i].clone();
+    for (const std::string mode : {"float", "fixed"}) {
+      for (int width : {320, 480, 640}) {
+        LocalRefiner local(width, true, "cpu", false, mode);
+        Images prior, saved;
+        for (int frame = 0; frame < 6; ++frame) {
+          Images images;
+          rng.fill(images[0] = Mat(480, 640, CV_8U), RNG::UNIFORM, 0, 255);
+          GaussianBlur(images[0], images[0], Size(5, 5), 0);
+          Mat move = (Mat_<double>(2, 3) << 1, 0, frame * 3 + 5, 0, 1, -4);
+          warpAffine(images[0], images[1], move, Size(640, 480));
+          images[2] = frame == 3 ? Mat::zeros(480, 640, CV_8U) : images[1].clone();
+          auto actual = local.refine(images);
+          double children = 0;
+          for (const auto *key : {"cpu_flow_resize_ms", "cpu_coords_ms", "cpu_map_convert_ms",
+                                  "cpu_image_remap_ms", "cpu_restore_ms"})
+            children += actual.timings[key].get<double>();
+          if (children > actual.timings["local_warp_ms"].get<double>() ||
+              (mode == "float" && actual.timings["cpu_map_convert_ms"].get<double>() != 0) ||
+              (mode == "fixed" && actual.timings["cpu_map_convert_ms"].get<double>() <= 0))
+            throw std::runtime_error("Incorrect nested CPU timings");
+          auto expected = reference(images, width, frame % 5 == 0);
+          if (actual.checked != (frame % 5 == 0) ||
+              norm(actual.validity, expected.validity, NORM_INF) != 0)
+            throw std::runtime_error("Validity/cadence mismatch");
+          for (int i = 0; i < 3; ++i) {
+            if (norm(actual.channels[i], expected.channels[i], NORM_INF) != 0)
+              throw std::runtime_error("Output differs from CPU baseline");
+            if (!prior[i].empty() && norm(prior[i], saved[i], NORM_INF) != 0)
+              throw std::runtime_error("Scratch overwrote a previously returned image");
+            prior[i] = actual.channels[i];
+            saved[i] = prior[i].clone();
+          }
         }
       }
     }
-    std::cout << "PASS: exact CPU parity at all widths, checks, blank input, output ownership\n";
+    std::cout << "PASS: float/fixed maps, exact CPU parity at all widths, checks, blank input, "
+                 "output ownership\n";
   } catch (const std::exception &e) {
     std::cerr << e.what() << '\n';
     return 1;

@@ -91,10 +91,12 @@ class LocalRefiner {
   // Scratch only: never reuse returned images or DIS outputs (nonempty flow enables warm starts).
   Images smallBuffers, resizeBuffers;
   cv::Mat flowBuffer, coordsBuffer, invalidBuffer, backBuffer, reverseBuffer;
+  cv::Mat fixedCoords, fractions;
+  bool fixedRemap;
 
 public:
   explicit LocalRefiner(int width = 640, bool live = false, const std::string &backend = "cpu",
-                        bool allowSoftware = false);
+                        bool allowSoftware = false, const std::string &cpuRemap = "float");
   json backendStatus() const;
   Refined refine(const Images &);
 };

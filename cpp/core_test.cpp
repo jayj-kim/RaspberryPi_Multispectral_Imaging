@@ -119,6 +119,17 @@ int main() {
     auto f = fast.refine({texture, source, source});
     check(f.checked, "First live check missing");
     check(!fast.refine({texture, source, source}).checked, "Live checks not amortized");
+    Mat color;
+    cvtColor(texture, color, COLOR_GRAY2BGR);
+    LivePipeline pipeline({{"cpu_remap", "fixed"}, {"flow_width", 320}});
+    auto output = pipeline.process({color, color, color}, 0);
+    double topLevel = 0;
+    for (auto it = output.stages.begin(); it != output.stages.end(); ++it)
+      if (it.key() != "total_ms" && it.key().rfind("cpu_", 0) != 0 &&
+          it.key().rfind("gpu_", 0) != 0)
+        topLevel += it.value().get<double>();
+    check(std::abs(topLevel - output.stages["total_ms"].get<double>()) < .001,
+          "Nested CPU timing counted twice in total/other");
     std::cout << "PASS: perspective, invalid points, centered smoothing, profile, dense two-depth "
                  "registration, blank validity, ORB, temporal tracking, global stabilization, jump "
                  "rejection, reduced live flow\n";

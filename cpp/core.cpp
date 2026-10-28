@@ -408,13 +408,16 @@ std::pair<Point2d, json> GlobalStabilizer::update(const Mat &g) {
            {"reason", reason.empty() ? json(nullptr) : json(reason)},
            {"translation_px", {correction.x, correction.y}}}};
 }
-LocalRefiner::LocalRefiner(int w, bool l, const std::string &backend, bool allowSoftware)
-    : width(w), live(l) {
+LocalRefiner::LocalRefiner(int w, bool l, const std::string &backend, bool allowSoftware,
+                           const std::string &cpuRemap)
+    : width(w), live(l), fixedRemap(cpuRemap == "fixed") {
+  require(cpuRemap == "float" || cpuRemap == "fixed", "Invalid CPU remap mode");
   require(w == 320 || w == 480 || w == 640, "Invalid flow width");
   engine = DISOpticalFlow::create(l ? DISOpticalFlow::PRESET_FAST : DISOpticalFlow::PRESET_MEDIUM);
   clahe = createCLAHE(2, Size(8, 8));
   require(backend == "cpu" || backend == "vulkan" || backend == "auto", "Invalid compute backend");
-  backendInfo = {{"requested", backend}, {"actual", "cpu"}, {"warning", nullptr}};
+  backendInfo = {
+      {"requested", backend}, {"actual", "cpu"}, {"cpu_remap", cpuRemap}, {"warning", nullptr}};
   if (backend != "cpu") {
     require(live, "Vulkan currently supports the realtime path only");
     try {
@@ -443,6 +446,12 @@ Refined LocalRefiner::refine(const Images &g) {
   for (const std::string key :
        {"gpu_pack_ms", "gpu_upload_ms", "gpu_submit_wait_ms", "gpu_download_ms", "gpu_kernel_ms"})
     r.timings[key] = 0.;
+  for (const std::string key : {"cpu_flow_resize_ms", "cpu_coords_ms", "cpu_map_convert_ms",
+                                "cpu_image_remap_ms", "cpu_restore_ms", "cpu_reverse_remap_ms"})
+    r.timings[key] = 0.;
+  auto addTime = [&](const char *key, double start) {
+    r.timings[key] = r.timings[key].get<double>() + ms(start);
+  };
   auto &small = smallBuffers;
   double tick = now();
   for (int i = 0; i < 3; i++) {
@@ -501,11 +510,14 @@ Refined LocalRefiner::refine(const Images &g) {
     engine->calc(small[0], small[cam], low);
     r.timings["dis_forward_ms"] = r.timings["dis_forward_ms"].get<double>() + ms(tick);
     tick = now();
+    double subTick = now();
     if (width == 640)
       flow = low;
     else {
       resize(low, flow, Size(640, 480));
     }
+    addTime("cpu_flow_resize_ms", subTick);
+    subTick = now();
     parallel_for_(Range(0, 480), [&](const Range &range) {
       for (int y = range.start; y < range.end; y++) {
         auto *f = flow.ptr<Vec2f>(y);
@@ -521,9 +533,22 @@ Refined LocalRefiner::refine(const Images &g) {
         }
       }
     });
-    remap(g[cam], mapped, coords, noArray(), INTER_LINEAR);
+    addTime("cpu_coords_ms", subTick);
+    if (fixedRemap) {
+      subTick = now();
+      convertMaps(coords, noArray(), fixedCoords, fractions, CV_16SC2);
+      addTime("cpu_map_convert_ms", subTick);
+    }
+    subTick = now();
+    if (fixedRemap)
+      remap(g[cam], mapped, fixedCoords, fractions, INTER_LINEAR);
+    else
+      remap(g[cam], mapped, coords, noArray(), INTER_LINEAR);
+    addTime("cpu_image_remap_ms", subTick);
+    subTick = now();
     // OpenCV's masked copy avoids another scalar per-pixel fallback pass.
     g[cam].copyTo(mapped, invalid);
+    addTime("cpu_restore_ms", subTick);
     r.channels[cam] = mapped;
     r.timings["local_warp_ms"] = r.timings["local_warp_ms"].get<double>() + ms(tick);
     if (r.checked) {
@@ -539,7 +564,13 @@ Refined LocalRefiner::refine(const Images &g) {
         resize(lowBack, back, Size(640, 480));
         back *= 640.f / width;
       }
-      remap(back, reverse, coords, noArray(), INTER_LINEAR, BORDER_CONSTANT, Scalar(1000, 1000));
+      subTick = now();
+      if (fixedRemap)
+        remap(back, reverse, fixedCoords, fractions, INTER_LINEAR, BORDER_CONSTANT,
+              Scalar(1000, 1000));
+      else
+        remap(back, reverse, coords, noArray(), INTER_LINEAR, BORDER_CONSTANT, Scalar(1000, 1000));
+      addTime("cpu_reverse_remap_ms", subTick);
       Mat valid;
       if (!live)
         valid.create(480, 640, CV_8U);
@@ -722,13 +753,15 @@ json Profile::summary() const {
           {"notes",
            {"Wall-clock timings; first five outputs excluded.",
             "Percentiles use latest 300 outputs; means/max cover full measured run.",
-            "Camera exposure, target-rate waits, network and browser excluded."}}};
+            "Camera exposure, target-rate waits, network and browser excluded.",
+            "cpu_* and gpu_* are nested timings already included in parent stages; do not add "
+            "twice."}}};
 }
 LivePipeline::LivePipeline(json c)
     : h(registration(fallback(c, "points", nullptr), fallback(c, "adjustments", nullptr))),
       config(c), temporal(h, "responsive"),
       local(c.value("flow_width", 320), true, c.value("compute_backend", std::string("cpu")),
-            c.value("allow_software_vulkan", false)) {}
+            c.value("allow_software_vulkan", false), c.value("cpu_remap", std::string("float"))) {}
 PipelineResult LivePipeline::process(const Images &bgr, double inputTime) {
   double begin = now(), tick = now();
   PipelineResult r;
@@ -775,7 +808,7 @@ PipelineResult LivePipeline::process(const Images &bgr, double inputTime) {
   r.stages["jpeg_ms"] = 0.;
   double sum = 0;
   for (auto it = r.stages.begin(); it != r.stages.end(); ++it)
-    if (it.key().rfind("gpu_", 0) != 0)
+    if (it.key().rfind("gpu_", 0) != 0 && it.key().rfind("cpu_", 0) != 0)
       sum += it.value().get<double>();
   double total = ms(begin);
   r.stages["other_ms"] = std::max(0., total - sum);

@@ -1,0 +1,235 @@
+{
+  "notes": [
+    "Same native binary, CPU backend, alternating order, same CSV timeline.",
+    "First five frames excluded. Decode/write/target waits excluded.",
+    "cpu_* timings are nested; map conversion is included in local_warp_ms.",
+    "Video comparison is decoded MJPEG, not ground truth registration accuracy."
+  ],
+  "threads": 2,
+  "widths": {
+    "320": {
+      "mean_ms": {
+        "float": {
+          "consistency_ms": 0.3991940779255308,
+          "cpu_coords_ms": 0.8187229856783698,
+          "cpu_flow_resize_ms": 0.2530971809043896,
+          "cpu_image_remap_ms": 0.739195358238758,
+          "cpu_map_convert_ms": 0.0,
+          "cpu_restore_ms": 0.023967366966341313,
+          "cpu_reverse_remap_ms": 0.22773352657490806,
+          "dis_forward_ms": 2.354902368877589,
+          "dis_reverse_ms": 0.4731290549679093,
+          "frame_pick_ms": 0.0,
+          "global_ms": 0.28255674468780867,
+          "global_warp_ms": 1.2866817021613766,
+          "gpu_download_ms": 0.0,
+          "gpu_kernel_ms": 0.0,
+          "gpu_pack_ms": 0.0,
+          "gpu_submit_wait_ms": 0.0,
+          "gpu_upload_ms": 0.0,
+          "grayscale_ms": 0.1973445815107383,
+          "jpeg_ms": 0.4627883953688082,
+          "local_prep_ms": 0.3804386046504852,
+          "local_warp_ms": 1.8359603704510012,
+          "merge_ms": 0.15446842732820296,
+          "other_ms": 0.05349025006116209,
+          "total_ms": 7.880954577990613
+        },
+        "fixed": {
+          "consistency_ms": 0.3895572819717617,
+          "cpu_coords_ms": 0.8174890141253209,
+          "cpu_flow_resize_ms": 0.2549302570521006,
+          "cpu_image_remap_ms": 0.6666086985644387,
+          "cpu_map_convert_ms": 0.25174780847732403,
+          "cpu_restore_ms": 0.026930531969404176,
+          "cpu_reverse_remap_ms": 0.21551195036183138,
+          "dis_forward_ms": 2.5049293615679002,
+          "dis_reverse_ms": 0.49719907802030944,
+          "frame_pick_ms": 0.0,
+          "global_ms": 0.2796184503462918,
+          "global_warp_ms": 1.2560260833171588,
+          "gpu_download_ms": 0.0,
+          "gpu_kernel_ms": 0.0,
+          "gpu_pack_ms": 0.0,
+          "gpu_submit_wait_ms": 0.0,
+          "gpu_upload_ms": 0.0,
+          "grayscale_ms": 0.170897319129842,
+          "jpeg_ms": 0.45804197870506386,
+          "local_prep_ms": 0.3744154911268881,
+          "local_warp_ms": 2.018790281837924,
+          "merge_ms": 0.1040455992538969,
+          "other_ms": 0.03727790270410833,
+          "total_ms": 8.090798827981146
+        }
+      },
+      "total_reduction_percent": -2.662675541571735,
+      "output_comparison": {
+        "frames": 193,
+        "max_pixel_difference": 0,
+        "mean_pixel_difference": 0.0
+      },
+      "runs": {
+        "float": [
+          8.083930532074133,
+          7.464334249794155,
+          8.09459895210355
+        ],
+        "fixed": [
+          8.19653841455797,
+          7.769636611633456,
+          8.30622145775201
+        ]
+      }
+    },
+    "480": {
+      "mean_ms": {
+        "float": {
+          "consistency_ms": 0.40332398048573354,
+          "cpu_coords_ms": 0.7262901507930748,
+          "cpu_flow_resize_ms": 0.30858380141064684,
+          "cpu_image_remap_ms": 0.7272942836497743,
+          "cpu_map_convert_ms": 0.0,
+          "cpu_restore_ms": 0.024762418466217233,
+          "cpu_reverse_remap_ms": 0.22824567374900265,
+          "dis_forward_ms": 4.1674932641166995,
+          "dis_reverse_ms": 0.837230152489823,
+          "frame_pick_ms": 0.0,
+          "global_ms": 0.28365734575758234,
+          "global_warp_ms": 1.2787044857527399,
+          "gpu_download_ms": 0.0,
+          "gpu_kernel_ms": 0.0,
+          "gpu_pack_ms": 0.0,
+          "gpu_submit_wait_ms": 0.0,
+          "gpu_upload_ms": 0.0,
+          "grayscale_ms": 0.19572737054407666,
+          "jpeg_ms": 0.4752222536376232,
+          "local_prep_ms": 0.7632424751510687,
+          "local_warp_ms": 1.7879689255373672,
+          "merge_ms": 0.027031359945311202,
+          "other_ms": 0.05490948589782252,
+          "total_ms": 10.274511099315848
+        },
+        "fixed": {
+          "consistency_ms": 0.41662605678106795,
+          "cpu_coords_ms": 0.832364455634643,
+          "cpu_flow_resize_ms": 0.32347206214458535,
+          "cpu_image_remap_ms": 0.7074630567389094,
+          "cpu_map_convert_ms": 0.25827224276939664,
+          "cpu_restore_ms": 0.028034351031392554,
+          "cpu_reverse_remap_ms": 0.22628329425576682,
+          "dis_forward_ms": 4.864152390153528,
+          "dis_reverse_ms": 0.9834196525134627,
+          "frame_pick_ms": 0.0,
+          "global_ms": 0.29676279610347794,
+          "global_warp_ms": 1.3085902393597395,
+          "gpu_download_ms": 0.0,
+          "gpu_kernel_ms": 0.0,
+          "gpu_pack_ms": 0.0,
+          "gpu_submit_wait_ms": 0.0,
+          "gpu_upload_ms": 0.0,
+          "grayscale_ms": 0.21464446104052792,
+          "jpeg_ms": 0.47292636352735085,
+          "local_prep_ms": 0.8178494254928326,
+          "local_warp_ms": 2.150822478574971,
+          "merge_ms": 0.027820515894120088,
+          "other_ms": 0.05483240610574156,
+          "total_ms": 11.608446785546821
+        }
+      },
+      "total_reduction_percent": -12.982960194765813,
+      "output_comparison": {
+        "frames": 193,
+        "max_pixel_difference": 0,
+        "mean_pixel_difference": 0.0
+      },
+      "runs": {
+        "float": [
+          10.633312654271263,
+          10.404185766093816,
+          9.786034877582464
+        ],
+        "fixed": [
+          11.721153420171987,
+          11.956616898927717,
+          11.147570037540758
+        ]
+      }
+    },
+    "640": {
+      "mean_ms": {
+        "float": {
+          "consistency_ms": 0.3308136667186747,
+          "cpu_coords_ms": 0.5262621682940083,
+          "cpu_flow_resize_ms": 0.006171953905419635,
+          "cpu_image_remap_ms": 0.7092998653883734,
+          "cpu_map_convert_ms": 0.0,
+          "cpu_restore_ms": 0.02885806363131496,
+          "cpu_reverse_remap_ms": 0.23412915787899846,
+          "dis_forward_ms": 6.86849052466809,
+          "dis_reverse_ms": 1.3512966897067613,
+          "frame_pick_ms": 0.0,
+          "global_ms": 0.277687363495393,
+          "global_warp_ms": 1.1987723793149372,
+          "gpu_download_ms": 0.0,
+          "gpu_kernel_ms": 0.0,
+          "gpu_pack_ms": 0.0,
+          "gpu_submit_wait_ms": 0.0,
+          "gpu_upload_ms": 0.0,
+          "grayscale_ms": 0.1348749962892835,
+          "jpeg_ms": 0.45661098406945705,
+          "local_prep_ms": 0.9781697215670815,
+          "local_warp_ms": 1.2715687020743722,
+          "merge_ms": 0.02942720572931687,
+          "other_ms": 0.03256085331466896,
+          "total_ms": 12.930273086948036
+        },
+        "fixed": {
+          "consistency_ms": 0.3268669113448279,
+          "cpu_coords_ms": 0.5082236258842502,
+          "cpu_flow_resize_ms": 0.0070607925053927,
+          "cpu_image_remap_ms": 0.6701978795685626,
+          "cpu_map_convert_ms": 0.26474823578042456,
+          "cpu_restore_ms": 0.02946291307183701,
+          "cpu_reverse_remap_ms": 0.22441120386860128,
+          "dis_forward_ms": 7.087891657808818,
+          "dis_reverse_ms": 1.4322311968073258,
+          "frame_pick_ms": 0.0,
+          "global_ms": 0.27669343438875904,
+          "global_warp_ms": 1.2027753634698353,
+          "gpu_download_ms": 0.0,
+          "gpu_kernel_ms": 0.0,
+          "gpu_pack_ms": 0.0,
+          "gpu_submit_wait_ms": 0.0,
+          "gpu_upload_ms": 0.0,
+          "grayscale_ms": 0.13730976253803465,
+          "jpeg_ms": 0.46021998395003105,
+          "local_prep_ms": 0.9925568244353011,
+          "local_warp_ms": 1.4807728724505158,
+          "merge_ms": 0.03157485986537348,
+          "other_ms": 0.03265771962840982,
+          "total_ms": 13.461550586687233
+        }
+      },
+      "total_reduction_percent": -4.108787928659252,
+      "output_comparison": {
+        "frames": 193,
+        "max_pixel_difference": 0,
+        "mean_pixel_difference": 0.0
+      },
+      "runs": {
+        "float": [
+          13.265940505489391,
+          12.985687994513045,
+          12.539190760841674
+        ],
+        "fixed": [
+          13.561843590302507,
+          13.465847031840623,
+          13.356961137918567
+        ]
+      }
+    }
+  },
+  "environment": "Cloud x86_64, OpenCV 4.10.0, two threads; NOT Raspberry Pi performance.",
+  "baseline_commit": "4ac806b"
+}
