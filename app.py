@@ -4,6 +4,8 @@ import atexit
 import csv
 from collections import deque
 import json
+import sys
+import platform
 from pathlib import Path
 import subprocess
 import threading
@@ -697,28 +699,88 @@ class LiveLocalRefinement:
         self.last_consistency=None
 
     def refine(self,channels):
+        stages={k:0.0 for k in ('local_prep_ms','dis_forward_ms','dis_reverse_ms','local_warp_ms','consistency_ms')}
+        tick=time.perf_counter()
         small=[self.clahe.apply(cv2.resize(g,(self.width,self.height))) for g in channels]
+        stages['local_prep_ms']=(time.perf_counter()-tick)*1000
         corrected=[channels[0]]
         check=self.count%5==0
         masks=[]
         for i in (1,2):
+            tick=time.perf_counter()
             low=self.engine.calc(small[0],small[i],None)
+            stages['dis_forward_ms']+=(time.perf_counter()-tick)*1000
+            tick=time.perf_counter()
             flow=cv2.resize(low,(640,480))*(640/self.width)
             coords=self.grid+flow
             mapped=cv2.remap(channels[i],coords,None,cv2.INTER_LINEAR)
             bounded=np.isfinite(coords).all(axis=2)&(np.linalg.norm(flow,axis=2)<60)
             corrected.append(np.where(bounded,mapped,channels[i]).astype(np.uint8))
+            stages['local_warp_ms']+=(time.perf_counter()-tick)*1000
             if check:
+                tick=time.perf_counter()
                 low_back=self.engine.calc(small[i],small[0],None)
+                stages['dis_reverse_ms']+=(time.perf_counter()-tick)*1000
+                tick=time.perf_counter()
                 back=cv2.resize(low_back,(640,480))*(640/self.width)
                 reverse=cv2.remap(back,coords,None,cv2.INTER_LINEAR,borderMode=cv2.BORDER_CONSTANT,borderValue=1000)
                 valid=bounded&(np.linalg.norm(flow+reverse,axis=2)<1.5)
                 valid&=(coords[:,:,0]>=0)&(coords[:,:,0]<639)&(coords[:,:,1]>=0)&(coords[:,:,1]<479)
                 valid&=(channels[0]>2)&(mapped>2)
                 masks.append(valid)
+                stages['consistency_ms']+=(time.perf_counter()-tick)*1000
+        tick=time.perf_counter()
         if check:self.last_consistency=float((masks[0]&masks[1]).mean())
+        stages['consistency_ms']+=(time.perf_counter()-tick)*1000 if check else 0
         self.count+=1
+        self.last_timings=stages
         return corrected,check,self.last_consistency
+
+
+class PerformanceProfile:
+    """Bounded samples for percentiles; cumulative means after five warmup outputs."""
+    def __init__(self,config):
+        self.config=config
+        self.seen=0
+        self.count=0
+        self.recording_frames=0
+        self.samples=deque(maxlen=300)
+        self.totals={}
+        self.groups={}
+
+    def record(self,stages,refreshed,checked,recording=False):
+        self.seen+=1
+        if self.seen<=5:return
+        self.count+=1
+        self.recording_frames+=int(recording)
+        self.samples.append(stages.copy())
+        for name,value in stages.items():
+            aggregate=self.totals.setdefault(name,{'sum':0.,'max':0.,'active':0})
+            aggregate['sum']+=value
+            aggregate['max']=max(aggregate['max'],value)
+            aggregate['active']+=int(value>0)
+        group=('global+check' if checked else 'global') if refreshed else ('check' if checked else 'ordinary')
+        if recording:group+='+recording'
+        entry=self.groups.setdefault(group,{'count':0,'sum_ms':0.,'max_ms':0.})
+        entry['count']+=1;entry['sum_ms']+=stages['total_ms'];entry['max_ms']=max(entry['max_ms'],stages['total_ms'])
+
+    def summary(self):
+        stages={}
+        for name,values in self.totals.items():
+            recent=[sample[name] for sample in self.samples]
+            active=[v for v in recent if v>0]
+            stages[name]={'mean_ms':round(values['sum']/self.count,3),'max_ms':round(values['max'],3),
+                          'p95_recent_ms':round(float(np.percentile(recent,95)),3),
+                          'active_count':values['active'],
+                          'active_mean_ms':round(values['sum']/max(1,values['active']),3),
+                          'active_p95_recent_ms':round(float(np.percentile(active,95)),3) if active else None}
+        return {'config':self.config,'outputs_seen':self.seen,'warmup_excluded':min(5,self.seen),
+                'measured_frames':self.count,'recording_frames':self.recording_frames,'percentile_window_frames':len(self.samples),'stages':stages,
+                'groups':{name:{'count':v['count'],'mean_ms':round(v['sum_ms']/v['count'],3),'max_ms':round(v['max_ms'],3)} for name,v in self.groups.items()},
+                'notes':['Wall-clock CPU pipeline timing, not pure Python execution time.',
+                         'Excludes camera exposure/capture, target-rate waits, socket transfer and browser rendering.',
+                         'frame_pick_ms includes snapshot lock contention with recording.',
+                         'Percentiles use at most the latest 300 measured outputs; means/max use the full measured run.']}
 
 
 class RealtimeComposer:
@@ -731,12 +793,14 @@ class RealtimeComposer:
         self.jpeg=None
         self.sequence=0
         self.metrics={'running':False}
+        self.profile=PerformanceProfile({})
 
     def status(self):
         with self.lock:
             data=self.metrics.copy()
             if data.get('source_ns'):
                 data['host_age_ms']=round((time.monotonic_ns()-data['source_ns'])/1e6,1)
+            data['profile']=self.profile.summary()
             return data
 
     def start_processing(self,body):
@@ -753,6 +817,9 @@ class RealtimeComposer:
         with self.lock:
             if self.thread and self.thread.is_alive():raise ValueError('실시간 합성이 이미 실행 중입니다')
             self.halt.clear();self.jpeg=None;self.sequence=0
+            self.profile=PerformanceProfile({'flow_width':width,'target_fps':fps,'opencv':cv2.__version__,
+                'opencv_threads':cv2.getNumThreads(),'python':sys.version.split()[0],'machine':platform.machine(),
+                'demo':self.rig.demo})
             self.metrics={'running':True,'processed':0,'target_fps':fps,'flow_width':width,'warning':'첫 프레임 대기'}
             self.thread=threading.Thread(target=self.run,args=(mapping,offsets,matrices,body.get('adjustments'),width,fps),daemon=True)
             self.thread.start()
@@ -790,14 +857,20 @@ class RealtimeComposer:
                 except ValueError as exc:
                     with self.lock:self.metrics['warning']=str(exc)
                     self.halt.wait(.1);continue
+                stages={'frame_pick_ms':(time.monotonic()-started)*1000}
                 sequence=tuple(x[2] for x in chosen)
                 if sequence==last_sequence:self.halt.wait(.01);continue
                 last_sequence=sequence
                 if previous_cam1 is not None:skipped+=max(0,sequence[0]-previous_cam1-1)
                 previous_cam1=sequence[0]
+                tick=time.perf_counter()
                 gray=[cv2.cvtColor(x[1],cv2.COLOR_BGR2GRAY) for x in chosen]
+                stages['grayscale_ms']=(time.perf_counter()-tick)*1000
+                stages['global_ms']=0.
                 warning=None
-                if started-last_refresh>=1:
+                refreshed=started-last_refresh>=1
+                if refreshed:
+                    global_tick=time.perf_counter()
                     last_refresh=started
                     try:
                         result=automatic_registration(gray)
@@ -805,13 +878,23 @@ class RealtimeComposer:
                         global_valid=True
                     except (ValueError,cv2.error,np.linalg.LinAlgError) as exc:
                         warning='전역 재정합 실패, 기존 보정 유지: '+str(exc)
+                    stages['global_ms']=(time.perf_counter()-global_tick)*1000
                 if not global_valid and warning is None:warning='자동 전역 정합 미확인: 초기 보정으로 처리 중'
+                tick=time.perf_counter()
                 warped=[warp_channel(g,matrices[i],offsets[i]) for i,g in enumerate(gray)]
+                stages['global_warp_ms']=(time.perf_counter()-tick)*1000
                 corrected,checked,consistency=refiner.refine(warped)
+                stages.update(refiner.last_timings)
+                tick=time.perf_counter()
                 composite=cv2.merge([corrected[mapping[2]],corrected[mapping[1]],corrected[mapping[0]]])
+                stages['merge_ms']=(time.perf_counter()-tick)*1000
+                tick=time.perf_counter()
                 ok,encoded=cv2.imencode('.jpg',composite,[cv2.IMWRITE_JPEG_QUALITY,75])
+                stages['jpeg_ms']=(time.perf_counter()-tick)*1000
                 if not ok:raise RuntimeError('실시간 JPEG 생성 실패')
                 published=time.monotonic()
+                stages['other_ms']=max(0,(published-started)*1000-sum(stages.values()))
+                stages['total_ms']=(published-started)*1000
                 if last_published is not None:
                     current=1/max(.0001,published-last_published)
                     average_fps=current if average_fps==0 else .8*average_fps+.2*current
@@ -819,6 +902,7 @@ class RealtimeComposer:
                 processed+=1
                 stamps=[x[0] for x in chosen]
                 with self.condition:
+                    self.profile.record(stages,refreshed,checked,recording=self.rig.recording is not None)
                     self.jpeg=encoded.tobytes();self.sequence+=1
                     self.metrics.update(running=True,processed=processed,fps=round(average_fps,2),
                         processing_ms=round((published-started)*1000,1),source_ns=min(stamps),
@@ -831,6 +915,14 @@ class RealtimeComposer:
             with self.lock:self.metrics['warning']='실시간 합성 중단: '+str(exc)
         finally:
             with self.condition:
+                try:
+                    folder=self.rig.output/'profiles'
+                    folder.mkdir(parents=True,exist_ok=True)
+                    path=folder/('live_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')+'.json')
+                    path.write_text(json.dumps(self.profile.summary(),indent=2))
+                    self.metrics['profile_file']=str(path)
+                except OSError as exc:
+                    self.metrics['warning']='계측 파일 저장 실패: '+str(exc)
                 self.metrics['running']=False
                 self.condition.notify_all()
 
@@ -887,6 +979,16 @@ def create_app(rig):
     def stop_live():
         rig.live.stop_processing()
         return jsonify(rig.live.status())
+
+    @app.get('/api/live/profile')
+    def live_profile():
+        with rig.live.lock:
+            data=rig.live.profile.summary()
+        response=jsonify(data)
+        if request.args.get('download')=='1':
+            response.headers['Content-Disposition']='attachment; filename="live_profile.json"'
+        response.headers['Cache-Control']='no-store'
+        return response
 
     @app.get('/live/stream')
     def live_stream():

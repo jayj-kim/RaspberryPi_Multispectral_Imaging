@@ -7,7 +7,7 @@ import csv
 import json
 import cv2
 import numpy as np
-from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration, TemporalRegistration, GlobalTranslationStabilizer, smooth_registration_path, LocalRefinement, LiveLocalRefinement
+from app import Rig, create_app, registration_matrices, warp_channel, automatic_registration, TemporalRegistration, GlobalTranslationStabilizer, smooth_registration_path, LocalRefinement, LiveLocalRefinement, PerformanceProfile
 
 
 class WorkflowTest(unittest.TestCase):
@@ -66,6 +66,22 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(len(response.json['reports']),2)
             self.assertFalse((folder/'alignment.json').exists())
 
+    def test_profile_warmup_and_active_stage_accounting(self):
+        profiler=PerformanceProfile({'target_fps':10})
+        for _ in range(5):profiler.record({'total_ms':999,'global_ms':999},True,False)
+        self.assertEqual(profiler.summary()['measured_frames'],0)
+        profiler.record({'total_ms':10,'global_ms':0},False,False)
+        profiler.record({'total_ms':30,'global_ms':20},True,True)
+        report=profiler.summary()
+        self.assertEqual(report['stages']['total_ms']['mean_ms'],20)
+        self.assertEqual(report['stages']['global_ms']['mean_ms'],10)
+        self.assertEqual(report['stages']['global_ms']['active_mean_ms'],20)
+        self.assertEqual(report['stages']['global_ms']['active_count'],1)
+        self.assertEqual(report['groups']['global+check']['count'],1)
+        for _ in range(400):profiler.record({'total_ms':5,'global_ms':0},False,False)
+        self.assertEqual(profiler.summary()['percentile_window_frames'],300)
+        self.assertEqual(profiler.summary()['stages']['total_ms']['max_ms'],30)
+
     def test_live_processing_with_recording_and_restart(self):
         with tempfile.TemporaryDirectory() as folder:
             rig=Rig(demo=True,output=folder)
@@ -80,7 +96,7 @@ class WorkflowTest(unittest.TestCase):
                 deadline=time.monotonic()+8
                 while time.monotonic()<deadline:
                     status=client.get('/api/status').json
-                    if status['live'].get('processed',0)>=2:break
+                    if status['live'].get('processed',0)>=7:break
                     time.sleep(.05)
                 else:self.fail(str(status))
                 response=client.get('/live/stream',buffered=False)
@@ -97,6 +113,14 @@ class WorkflowTest(unittest.TestCase):
                 self.assertGreaterEqual(status['live']['host_age_ms'],0)
                 stopped=client.post('/api/live/stop',headers=headers)
                 self.assertFalse(stopped.json['running'])
+                profile=client.get('/api/live/profile?download=1')
+                self.assertEqual(profile.status_code,200)
+                self.assertIn('attachment',profile.headers['Content-Disposition'])
+                self.assertGreater(profile.json['measured_frames'],0)
+                self.assertEqual(profile.json['warmup_excluded'],5)
+                self.assertIn('dis_forward_ms',profile.json['stages'])
+                self.assertIn('total_ms',profile.json['stages'])
+                self.assertTrue(Path(stopped.json['profile_file']).is_file())
                 self.assertFalse(rig.live.thread.is_alive())
                 for fps in (10,15,20,30):
                     restarted=client.post('/api/live/start',headers=headers,json={'target_fps':fps,'flow_width':320})
