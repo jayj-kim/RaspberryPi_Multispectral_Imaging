@@ -61,3 +61,7 @@ if(HAVE_VULKAN)
   add_test(NAME vulkan_parity COMMAND vulkan_test)
   set_tests_properties(vulkan_parity PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+add_executable(cpu_parity_test cpu_parity_test.cpp)
+target_link_libraries(cpu_parity_test PRIVATE imaging_core)
+add_test(NAME cpu_parity COMMAND cpu_parity_test)

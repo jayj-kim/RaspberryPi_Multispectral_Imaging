@@ -1,0 +1,199 @@
+{
+  "environment": "Cloud x86_64; not Raspberry Pi performance. OpenCV 4.10.0, two threads. Alternating order, three runs, same 193-frame input; timings exclude video decoding/writing.",
+  "widths": {
+    "320": {
+      "runs": {
+        "before": [
+          {
+            "total_ms": 8.480322760852745,
+            "local_warp_ms": 1.9709741331330697,
+            "global_warp_ms": 1.8540084945422504,
+            "consistency_ms": 0.6263185319535006
+          },
+          {
+            "total_ms": 8.736810803210128,
+            "local_warp_ms": 1.9817063403605333,
+            "global_warp_ms": 1.8248277020439732,
+            "consistency_ms": 0.609331340475616
+          },
+          {
+            "total_ms": 8.933997744629488,
+            "local_warp_ms": 2.0125584310625664,
+            "global_warp_ms": 1.8279107873356824,
+            "consistency_ms": 0.6101740957208367
+          }
+        ],
+        "after": [
+          {
+            "total_ms": 7.858310670076691,
+            "local_warp_ms": 1.815174281797768,
+            "global_warp_ms": 1.2617789627759695,
+            "consistency_ms": 0.39344812221122294
+          },
+          {
+            "total_ms": 7.7048358136109645,
+            "local_warp_ms": 1.844646989469611,
+            "global_warp_ms": 1.2412422552478481,
+            "consistency_ms": 0.40521262773372074
+          },
+          {
+            "total_ms": 8.252386744564493,
+            "local_warp_ms": 1.8854860048877333,
+            "global_warp_ms": 1.2850473988092221,
+            "consistency_ms": 0.3890338137623869
+          }
+        ]
+      },
+      "means": {
+        "before": {
+          "total_ms": 8.717043769564121,
+          "local_warp_ms": 1.9884129681853897,
+          "global_warp_ms": 1.8355823279739687,
+          "consistency_ms": 0.6152746560499844
+        },
+        "after": {
+          "total_ms": 7.938511076084049,
+          "local_warp_ms": 1.8484357587183708,
+          "global_warp_ms": 1.2626895389443467,
+          "consistency_ms": 0.3958981879024435
+        }
+      },
+      "processing_time_reduction_percent": 8.931155034443528,
+      "output_comparison": {
+        "frames": 193,
+        "max_pixel_difference": 0,
+        "mean_pixel_difference": 0.0
+      }
+    },
+    "480": {
+      "runs": {
+        "before": [
+          {
+            "total_ms": 12.478361250303236,
+            "local_warp_ms": 2.1682936916322237,
+            "global_warp_ms": 1.8331310529902112,
+            "consistency_ms": 0.6530244255818035
+          },
+          {
+            "total_ms": 12.422546271061057,
+            "local_warp_ms": 2.202254739421868,
+            "global_warp_ms": 1.833400393615135,
+            "consistency_ms": 0.6696586436172514
+          },
+          {
+            "total_ms": 12.639635526651778,
+            "local_warp_ms": 2.1751081705317237,
+            "global_warp_ms": 1.8736978085956815,
+            "consistency_ms": 0.6675869149438903
+          }
+        ],
+        "after": [
+          {
+            "total_ms": 11.290795180665302,
+            "local_warp_ms": 1.914157771081707,
+            "global_warp_ms": 1.2253049202085327,
+            "consistency_ms": 0.4411652340190522
+          },
+          {
+            "total_ms": 10.98939313851588,
+            "local_warp_ms": 1.8941010104483327,
+            "global_warp_ms": 1.2530652977263943,
+            "consistency_ms": 0.4158180744080381
+          },
+          {
+            "total_ms": 11.050151228641397,
+            "local_warp_ms": 1.9041105320247105,
+            "global_warp_ms": 1.2541766119342201,
+            "consistency_ms": 0.44165310102587374
+          }
+        ]
+      },
+      "means": {
+        "before": {
+          "total_ms": 12.51351434933869,
+          "local_warp_ms": 2.1818855338619385,
+          "global_warp_ms": 1.8467430850670092,
+          "consistency_ms": 0.6634233280476484
+        },
+        "after": {
+          "total_ms": 11.110113182607526,
+          "local_warp_ms": 1.90412310451825,
+          "global_warp_ms": 1.244182276623049,
+          "consistency_ms": 0.43287880315098803
+        }
+      },
+      "processing_time_reduction_percent": 11.215084168623912,
+      "output_comparison": {
+        "frames": 193,
+        "max_pixel_difference": 0,
+        "mean_pixel_difference": 0.0
+      }
+    },
+    "640": {
+      "runs": {
+        "before": [
+          {
+            "total_ms": 12.396790441268054,
+            "local_warp_ms": 1.111847904135078,
+            "global_warp_ms": 1.8082550586381756,
+            "consistency_ms": 0.4455616755412267
+          },
+          {
+            "total_ms": 13.434639074593507,
+            "local_warp_ms": 1.186805739439962,
+            "global_warp_ms": 1.8195361544325777,
+            "consistency_ms": 0.45629996276012263
+          },
+          {
+            "total_ms": 14.115193271131734,
+            "local_warp_ms": 1.2214381701616073,
+            "global_warp_ms": 1.8527140640063853,
+            "consistency_ms": 0.490610813977447
+          }
+        ],
+        "after": [
+          {
+            "total_ms": 13.25280960096047,
+            "local_warp_ms": 1.305219792521576,
+            "global_warp_ms": 1.1983391702628108,
+            "consistency_ms": 0.3344573190375702
+          },
+          {
+            "total_ms": 12.469695744778406,
+            "local_warp_ms": 1.2337510743817164,
+            "global_warp_ms": 1.197760760562155,
+            "consistency_ms": 0.336669388200383
+          },
+          {
+            "total_ms": 13.049859606384262,
+            "local_warp_ms": 1.2817303085807423,
+            "global_warp_ms": 1.2152945000513895,
+            "consistency_ms": 0.3372552288017184
+          }
+        ]
+      },
+      "means": {
+        "before": {
+          "total_ms": 13.315540928997764,
+          "local_warp_ms": 1.1733639379122158,
+          "global_warp_ms": 1.8268350923590462,
+          "consistency_ms": 0.4641574840929321
+        },
+        "after": {
+          "total_ms": 12.924121650707713,
+          "local_warp_ms": 1.2735670584946783,
+          "global_warp_ms": 1.2037981436254517,
+          "consistency_ms": 0.3361273120132239
+        }
+      },
+      "processing_time_reduction_percent": 2.9395672348364155,
+      "output_comparison": {
+        "frames": 193,
+        "max_pixel_difference": 0,
+        "mean_pixel_difference": 0.0
+      }
+    }
+  },
+  "baseline_commit": "9b7ef64",
+  "measurement_scope": "First five frames excluded; same CSV timeline, CPU backend, no recording; video comparison is decoded MJPEG, synthetic cpu_parity_test also checks uncompressed pixels and masks."
+}

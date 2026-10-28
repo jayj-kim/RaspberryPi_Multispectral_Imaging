@@ -149,6 +149,11 @@ Mat warp(const Mat &g, const Mat &h, const json &o) {
   double x = o[0], y = o[1];
   require(std::isfinite(x) && std::isfinite(y) && std::abs(x) <= 640 && std::abs(y) <= 640,
           "Invalid offset");
+  // The reference camera is normally unchanged. Avoid a full perspective resample,
+  // but retain independent output storage just like warpPerspective.
+  if (g.size() == Size(640, 480) && x == 0 && y == 0 &&
+      norm(h, Mat::eye(3, 3, h.type()), NORM_INF) == 0)
+    return g.clone();
   Mat t = (Mat_<double>(3, 3) << 1, 0, x, 0, 1, y, 0, 0, 1), out;
   warpPerspective(g, out, t * h, Size(640, 480));
   return out;
@@ -438,10 +443,10 @@ Refined LocalRefiner::refine(const Images &g) {
   for (const std::string key :
        {"gpu_pack_ms", "gpu_upload_ms", "gpu_submit_wait_ms", "gpu_download_ms", "gpu_kernel_ms"})
     r.timings[key] = 0.;
-  Images small;
+  auto &small = smallBuffers;
   double tick = now();
   for (int i = 0; i < 3; i++) {
-    Mat a;
+    Mat &a = resizeBuffers[i];
     if (width == 640)
       a = g[i];
     else
@@ -488,7 +493,10 @@ Refined LocalRefiner::refine(const Images &g) {
   Mat validAll(480, 640, CV_8U, Scalar(255));
   r.reports = json::array();
   for (int cam = 1; cam < 3; cam++) {
-    Mat low, flow, coords(480, 640, CV_32FC2), mapped;
+    Mat low, mapped;
+    Mat &flow = flowBuffer, &coords = coordsBuffer, &invalid = invalidBuffer;
+    coords.create(480, 640, CV_32FC2);
+    invalid.create(480, 640, CV_8U);
     tick = now();
     engine->calc(small[0], small[cam], low);
     r.timings["dis_forward_ms"] = r.timings["dis_forward_ms"].get<double>() + ms(tick);
@@ -497,37 +505,30 @@ Refined LocalRefiner::refine(const Images &g) {
       flow = low;
     else {
       resize(low, flow, Size(640, 480));
-      flow *= 640.f / width;
     }
     parallel_for_(Range(0, 480), [&](const Range &range) {
       for (int y = range.start; y < range.end; y++) {
         auto *f = flow.ptr<Vec2f>(y);
         auto *c = coords.ptr<Vec2f>(y);
-        for (int x = 0; x < 640; x++)
-          c[x] = f[x] + Vec2f(float(x), float(y));
-      }
-    });
-    remap(g[cam], mapped, coords, noArray(), INTER_LINEAR);
-    Mat usable(480, 640, CV_8U);
-    parallel_for_(Range(0, 480), [&](const Range &range) {
-      for (int y = range.start; y < range.end; y++) {
-        auto *f = flow.ptr<Vec2f>(y);
-        auto *c = coords.ptr<Vec2f>(y);
-        auto *m = usable.ptr<uchar>(y);
-        auto *out = mapped.ptr<uchar>(y);
-        auto *src = g[cam].ptr<uchar>(y);
+        auto *bad = invalid.ptr<uchar>(y);
         for (int x = 0; x < 640; x++) {
-          bool good = std::isfinite(c[x][0]) && std::isfinite(c[x][1]) && f[x].dot(f[x]) < 3600;
-          m[x] = good ? 255 : 0;
-          if (!good)
-            out[x] = src[x];
+          if (width != 640)
+            f[x] *= 640.f / width;
+          c[x] = f[x] + Vec2f(float(x), float(y));
+          bad[x] = !(std::isfinite(c[x][0]) && std::isfinite(c[x][1]) && f[x].dot(f[x]) < 3600)
+                       ? 255
+                       : 0;
         }
       }
     });
+    remap(g[cam], mapped, coords, noArray(), INTER_LINEAR);
+    // OpenCV's masked copy avoids another scalar per-pixel fallback pass.
+    g[cam].copyTo(mapped, invalid);
     r.channels[cam] = mapped;
     r.timings["local_warp_ms"] = r.timings["local_warp_ms"].get<double>() + ms(tick);
     if (r.checked) {
-      Mat lowBack, back, reverse;
+      Mat lowBack;
+      Mat &back = backBuffer, &reverse = reverseBuffer;
       tick = now();
       engine->calc(small[cam], small[0], lowBack);
       r.timings["dis_reverse_ms"] = r.timings["dis_reverse_ms"].get<double>() + ms(tick);
@@ -539,7 +540,9 @@ Refined LocalRefiner::refine(const Images &g) {
         back *= 640.f / width;
       }
       remap(back, reverse, coords, noArray(), INTER_LINEAR, BORDER_CONSTANT, Scalar(1000, 1000));
-      Mat valid(480, 640, CV_8U);
+      Mat valid;
+      if (!live)
+        valid.create(480, 640, CV_8U);
       std::vector<double> err, mag;
       if (!live) {
         err.reserve(640 * 480);
@@ -550,19 +553,21 @@ Refined LocalRefiner::refine(const Images &g) {
           auto *f = flow.ptr<Vec2f>(y);
           auto *b = reverse.ptr<Vec2f>(y);
           auto *c = coords.ptr<Vec2f>(y);
-          auto *use = usable.ptr<uchar>(y);
-          auto *v = valid.ptr<uchar>(y);
+          auto *bad = invalid.ptr<uchar>(y);
+          auto *all = validAll.ptr<uchar>(y);
+          auto *v = live ? nullptr : valid.ptr<uchar>(y);
           auto *ref = g[0].ptr<uchar>(y);
           auto *src = mapped.ptr<uchar>(y);
           for (int x = 0; x < 640; x++) {
             Vec2f roundtrip = f[x] + b[x];
-            bool good = use[x] && roundtrip.dot(roundtrip) < 2.25 && c[x][0] >= 0 &&
+            bool good = !bad[x] && roundtrip.dot(roundtrip) < 2.25 && c[x][0] >= 0 &&
                         c[x][0] < 639 && c[x][1] >= 0 && c[x][1] < 479 && ref[x] > 2 && src[x] > 2;
-            v[x] = good ? 255 : 0;
+            if (v)
+              v[x] = good ? 255 : 0;
+            all[x] &= good ? 255 : 0;
           }
         }
       });
-      bitwise_and(validAll, valid, validAll);
       if (!live) {
         for (int y = 0; y < 480; y++) {
           auto *f = flow.ptr<Vec2f>(y);

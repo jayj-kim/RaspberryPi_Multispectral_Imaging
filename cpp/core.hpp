@@ -88,6 +88,9 @@ class LocalRefiner {
   double lastConsistency = -1;
   std::unique_ptr<VulkanRemapper> gpu;
   json backendInfo;
+  // Scratch only: never reuse returned images or DIS outputs (nonempty flow enables warm starts).
+  Images smallBuffers, resizeBuffers;
+  cv::Mat flowBuffer, coordsBuffer, invalidBuffer, backBuffer, reverseBuffer;
 
 public:
   explicit LocalRefiner(int width = 640, bool live = false, const std::string &backend = "cpu",
