@@ -1,0 +1,49 @@
+{
+  "host_machine": "x86_64",
+  "opencv": "4.10.0",
+  "threads": 2,
+  "flow_width": 320,
+  "stride": 1,
+  "repeat": 3,
+  "opencv_build_match": true,
+  "median_run_mean_ms": {
+    "python": 19.246,
+    "cpp": 8.947982664741428
+  },
+  "cpp_speedup": 2.15087587013739,
+  "cpu_pipeline_capacity_fps": {
+    "python": 51.958848591915206,
+    "cpp": 111.75703367647252
+  },
+  "output_comparison": {
+    "frames": 193,
+    "mean_absolute_pixel_difference": 0.0036775252211493936,
+    "p95_frame_mean_difference": 0.019692490994930263,
+    "max_channel_difference": 43.0,
+    "median_psnr_db": 72.32089093763277,
+    "note": "Agreement between implementations, not a ground-truth registration accuracy metric. MJPEG quantization is included."
+  },
+  "notes": [
+    "Not a camera/browser end-to-end fps measurement.",
+    "Same timestamp timeline and ORB refresh schedule; input decoding/output video write excluded.",
+    "No target-fps sleep. First five outputs excluded in each run.",
+    "Run order alternates. On Pi run with other camera apps stopped.",
+    "C++ includes fused memory loops, so this measures the rewrite plus implementation optimizations.",
+    "Cloud x86_64 result; Raspberry Pi 5 performance remains unmeasured."
+  ],
+  "offline_output_comparison": {
+    "frames": 193,
+    "mean_absolute_pixel_difference": 0.04845617112796814,
+    "p95_frame_mean_difference": 0.10332552194595335,
+    "max_channel_difference": 255.0,
+    "median_psnr_db": 57.778747816728384,
+    "note": "Agreement between implementations, not a ground-truth registration accuracy metric. MJPEG quantization is included."
+  },
+  "offline_counts": {
+    "common_frames": 193,
+    "python_estimated": 122,
+    "cpp_estimated": 122,
+    "python_fallback": 71,
+    "cpp_fallback": 71
+  }
+}

@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>3 Camera Studio</title>
+<style>body{font:16px system-ui;background:#101820;color:#edf3f7;max-width:1200px;margin:30px auto;padding:16px}section{display:flex;gap:16px;flex-wrap:wrap}article{flex:1;min-width:260px;background:#20303e;padding:16px;border-radius:12px}img{width:100%}button,select,input{font:inherit;padding:8px;margin:4px}input{width:70px}button{cursor:pointer}pre{white-space:pre-wrap;color:#92dec8}small{color:#b8c9d4}#pixelLoupe{position:fixed;z-index:20;pointer-events:none;background:#101820;border:2px solid #ffdf30;border-radius:6px;padding:6px;box-shadow:0 4px 24px #000a;max-width:calc(100vw - 20px)}#pixelLoupe canvas{display:block;width:224px;height:224px;max-width:100%;image-rendering:pixelated}#pixelLoupeLabel{font:13px monospace;color:#ffdf30;margin-top:5px}canvas:focus-visible{outline:2px solid #ffdf30}</style>
+<h1>3 Camera Studio C++ __DEMO__</h1>
+<p>USB 카메라 촬영 · 저장 영상 RGB 합성</p>
+<section><article><h2>cam1</h2><img src="/stream/0" alt="카메라 연결 대기"><p id="status0">연결 중</p></article><article><h2>cam2</h2><img src="/stream/1" alt="카메라 연결 대기"><p id="status1">연결 중</p></article><article><h2>cam3</h2><img src="/stream/2" alt="카메라 연결 대기"><p id="status2">연결 중</p></article></section>
+<p><button onclick="act('start')">녹화 시작</button><button onclick="act('stop')">녹화 중지</button><span id="record"></span></p>
+<h2>실시간 합성 미리보기</h2>
+<p><label>국소 계산 폭 <select id="liveWidth"><option value="320" selected>320 — 속도 우선</option><option value="480">480 — 중간</option><option value="640">640 — 세부 정합 우선</option></select></label>
+<label>목표 속도 <select id="liveFps"><option value="5" selected>5 fps</option><option value="10">10 fps</option><option value="15">15 fps</option><option value="20">20 fps</option><option value="30">30 fps</option></select></label></p>
+<p><button onclick="startLive()">실시간 합성 시작</button><button onclick="stopLive()">실시간 합성 중지</button></p>
+<img id="liveImage" hidden alt="실시간 합성 대기" style="max-width:960px">
+<pre id="liveStatus" role="status">중지됨</pre>
+<h3>실시간 처리 계측</h3><pre id="liveProfile">실시간 합성을 시작하면 측정합니다. 첫 5프레임은 예열로 제외합니다.</pre>
+<p><a href="/api/live/profile?download=1" download="live_profile.json" style="color:#92dec8">계측 결과 JSON 다운로드</a></p>
+<p><small>평균은 예열 후 전체 처리 프레임 기준, 실행 시 평균은 해당 단계를 실행한 프레임만 계산합니다. P95는 최근 최대 300프레임 기준입니다. 카메라 노출·전송·브라우저 표시 시간과 목표 fps 대기는 포함하지 않습니다. 60초 정도 실행 후 중지하고 결과를 다운로드하세요.</small></p>
+<p><small>실제 속도는 기기 성능에 따라 달라집니다. 최신 프레임만 처리하며, 계산 폭과 무관하게 출력은 640×480입니다. 현재 RGB 배치·수동 보정값으로 시작합니다. 설정을 바꾸면 중지 후 다시 시작하세요. 원본 3채널 녹화는 별도로 유지되며 실시간 합성 영상은 저장하지 않습니다. 후처리의 앞뒤 프레임 평활화는 적용하지 않아 결과가 다를 수 있습니다.</small></p>
+<h2>촬영 후 합성</h2><p><small>녹화를 중지한 세션을 선택하세요. 각 카메라를 회색조로 변환해 RGB에 배치합니다. 필터가 없으면 파장별 영상이 아닙니다.</small></p>
+<select id="sessions"></select><button onclick="sessions()">목록 새로고침</button>
+<section><article><h3>R 채널</h3><select id="map0"><option value="0" selected>cam1</option><option value="1" >cam2</option><option value="2" >cam3</option></select></article><article><h3>G 채널</h3><select id="map1"><option value="0" >cam1</option><option value="1" selected>cam2</option><option value="2" >cam3</option></select></article><article><h3>B 채널</h3><select id="map2"><option value="0" >cam1</option><option value="1" >cam2</option><option value="2" selected>cam3</option></select></article></section>
+<h3>정합 미리보기</h3>
+<p>촬영 위치 <input id="position" type="range" min="0" max="1" step="0.01" value="0.5" style="width:260px"> <button onclick="preview()">미리보기 갱신</button></p>
+<img id="alignment" alt="완료된 세션을 선택하면 RGB 중첩 영상이 표시됩니다" style="max-width:960px;border:1px solid #658090">
+<p id="previewStatus" role="status"></p>
+<p><small>같은 물체의 윤곽이 겹치도록 이동하세요. 색이 갈라진 윤곽은 정렬 차이를 나타냅니다. 먼저 R=cam1, G=cam2, B=cam3으로 두고 cam1을 기준으로 cam2·cam3을 조정하세요. 시간 슬라이더로 정지된 장면을 고를 수 있습니다.</small></p>
+<h3>자동 정합 — 필터 없는 영상 검증</h3>
+<p><button id="autoRegister" onclick="autoRegister()">선택 장면 자동 정합</button> <button onclick="restoreRegistration()">자동 정합 전 설정 복원</button></p>
+<p><small>cam1을 기준으로 ORB 특징점과 RANSAC 원근 변환을 계산합니다. 평평하고 무늬가 많은 정지 대상을 선택하세요. 성공한 경우에만 두 카메라 보정을 함께 적용합니다. 선택한 한 장면의 고정 보정이며, 이동 영상 전체를 프레임마다 추적하는 기능은 아닙니다.</small></p>
+<pre id="autoReport" role="status"></pre>
+<h3>4점 원근 정합 — cam1 기준</h3>
+<p>같은 평면의 특징점 4개를 각 영상에서 <strong>동일한 순서</strong>로 클릭하세요. 예: 종이의 왼쪽 위 → 오른쪽 위 → 오른쪽 아래 → 왼쪽 아래. 점은 넓게 분포시키세요. cam1과 cam2부터 선택한 다음 cam3을 맞출 수 있습니다.</p>
+<p><small>아래 영상은 보정 전 원본입니다. 4점을 완성하면 위 중첩 미리보기에 자동 적용됩니다. 서로 다른 거리의 물체와 렌즈 왜곡은 한 번의 원근 변환으로 모두 맞지 않습니다.</small></p>
+<section><article><h3>cam1 대응점 <span id="count0">0/4</span></h3><canvas id="points0" tabindex="0" aria-label="cam1 대응점 선택. 방향키로 픽셀 이동, Enter로 선택" width="640" height="480" style="width:100%;cursor:crosshair;background:#111"></canvas><button onclick="startKeyboard(0)">키보드 선택 시작</button><button onclick="undoPoint(0)">마지막 점 취소</button><button onclick="clearPoints(0)">점 초기화</button></article><article><h3>cam2 대응점 <span id="count1">0/4</span></h3><canvas id="points1" tabindex="0" aria-label="cam2 대응점 선택. 방향키로 픽셀 이동, Enter로 선택" width="640" height="480" style="width:100%;cursor:crosshair;background:#111"></canvas><button onclick="startKeyboard(1)">키보드 선택 시작</button><button onclick="undoPoint(1)">마지막 점 취소</button><button onclick="clearPoints(1)">점 초기화</button></article><article><h3>cam3 대응점 <span id="count2">0/4</span></h3><canvas id="points2" tabindex="0" aria-label="cam3 대응점 선택. 방향키로 픽셀 이동, Enter로 선택" width="640" height="480" style="width:100%;cursor:crosshair;background:#111"></canvas><button onclick="startKeyboard(2)">키보드 선택 시작</button><button onclick="undoPoint(2)">마지막 점 취소</button><button onclick="clearPoints(2)">점 초기화</button></article></section>
+<p><small>영상 위에서 마우스를 움직이면 커서 주변이 8배 확대됩니다. 십자선 중앙이 선택할 픽셀입니다. 마우스로 대략적인 위치를 잡은 뒤 방향키로 1픽셀씩 이동하고 Enter로 점을 저장하세요. 클릭하지 않아도 됩니다. 또는 각 영상의 키보드 선택 시작 버튼을 누르세요.</small></p>
+<div id="pixelLoupe" hidden aria-hidden="true"><canvas id="pixelLoupeCanvas" width="224" height="224"></canvas><div id="pixelLoupeLabel"></div></div>
+<p id="pointStatus" role="status"></p>
+<p>추가 미세 조정 — 원근 보정 후 회전·배율·이동을 적용합니다:</p><p>cam1 X <input id="x0" type="number" value="0" min="-640" max="640"> Y <input id="y0" type="number" value="0" min="-640" max="640"> 회전(도) <input id="angle0" type="number" value="0" min="-180" max="180" step="0.1"> 배율 <input id="scale0" type="number" value="1" min="0.2" max="5" step="0.001"></p><p>cam2 X <input id="x1" type="number" value="0" min="-640" max="640"> Y <input id="y1" type="number" value="0" min="-640" max="640"> 회전(도) <input id="angle1" type="number" value="0" min="-180" max="180" step="0.1"> 배율 <input id="scale1" type="number" value="1" min="0.2" max="5" step="0.001"></p><p>cam3 X <input id="x2" type="number" value="0" min="-640" max="640"> Y <input id="y2" type="number" value="0" min="-640" max="640"> 회전(도) <input id="angle2" type="number" value="0" min="-180" max="180" step="0.1"> 배율 <input id="scale2" type="number" value="1" min="0.2" max="5" step="0.001"></p>
+<p><label><input id="dynamic" type="checkbox"> 프레임별 자동 정합 (저장 영상 후처리)</label></p>
+<p><small>체크하면 각 프레임에서 두 카메라를 다시 정합합니다. 실패하면 직전 유효값, 첫 성공 전에는 현재 수동 보정값을 사용합니다. 처리 시간이 늘어납니다. 미리보기는 현재 고정 보정값을 표시합니다.</small></p>
+<p><label>정합 방식 <select id="registrationMethod"><option value="orb" selected>기존 방식 — 매 프레임 ORB (기본)</option><option value="tracking">실험 기능 — 특징점 추적</option></select></label></p>
+<p><small>비교할 때는 기존 방식 + 화면 전체 흔들림 완화 끄기로 시작하세요. 세션을 선택할 때 이 두 항목은 안전한 기본값으로 초기화됩니다.</small></p>
+<p><label>안정화 강도 <select id="stabilization"><option value="strong">강하게 — 떨림 억제 우선</option><option value="balanced" selected>균형</option><option value="responsive">빠르게 — 움직임 추종 우선</option></select></label></p>
+<p><small>강한 안정화는 변화에 늦게 반응할 수 있습니다. 큰 급변은 연속 3회 확인 후 적용합니다. 위 강도는 채널 정합값만 조절합니다. 화면 전체 흔들림은 아래 옵션을 사용하세요.</small></p>
+<p><label>시간축 떨림 완화 <select id="temporalWindow"><option value="0">끄기 — 기존 결과 비교</option><option value="15">약하게 — 15프레임</option><option value="31" selected>권장 — 31프레임</option><option value="61">강하게 — 61프레임</option></select></label></p>
+<p><small>저장 영상의 앞뒤 보정값을 함께 평활화합니다. 대상 영역을 지정할 필요가 없습니다. 분석 후 영상을 다시 읽어 저장하며, 원본 cam1의 움직임은 유지합니다. 큰 창은 거리 변화에 따른 정합 정확도를 낮출 수 있습니다.</small></p>
+<p><label><input id="globalStabilization" type="checkbox"> 실험 기능: 화면 전체 흔들림 완화 (이동 보정)</label></p>
+<p><small>프레임별 정합 모드에서 사용합니다. cam1의 움직임을 추정해 RGB 전체에 동일한 이동을 적용합니다. 가장자리에 검은 영역이 생길 수 있으며 회전·확대 흔들림은 보정하지 않습니다.</small></p>
+<p><label><input id="localRefinement" type="checkbox"> 국소 정합 — 가까운 물체/배경의 위치별 차이 보정 (시험 기능)</label></p>
+<p><small>전역 변환 후 DIS 광학 흐름으로 cam2·cam3을 위치별로 보정합니다. 어두운 영역·가림 경계에서 잘못 변형될 수 있습니다. 검사 영상의 흰색은 왕복 일관성 통과, 검은색은 미검증 영역입니다. 검은 영역도 합성에는 근사값으로 포함되므로 정량 측정용으로 그대로 신뢰하지 마세요. 처리 시간이 늘어납니다.</small></p>
+<p id="composeProgress" role="status"></p>
+<button id="compose" onclick="merge()">합성 영상 저장</button><p><small>출력: 고정 정합은 composite.avi, 기존 방식은 composite_dynamic.avi이며, 실험 추적은 _tracking, 전체 안정화는 _stabilized, 시간축 평활화는 _smooth 접미사가 붙습니다. 4점 원근 변환과 회전·배율·이동을 저장 영상에도 동일하게 적용합니다. 정밀 동기화·렌즈 왜곡 보정·실시간 합성은 후속 기능입니다.</small></p><pre id="result" role="status"></pre>
+<script>
+const el=id=>document.getElementById(id);
+let points=[[],[],[]], rawImages=[null,null,null], rawVersion=0;
+let previewTimer, previewController, previewUrl, loadedSession=null;
+function payload(){return {local_refinement:el('localRefinement').checked,temporal_window:Number(el('temporalWindow').value),registration_method:el('registrationMethod').value,global_stabilization:el('globalStabilization').checked,stabilization:el('stabilization').value,dynamic:el('dynamic').checked,session:el('sessions').value,position:Number(el('position').value),mapping:[0,1,2].map(i=>Number(el('map'+i).value)),offsets:[0,1,2].map(i=>[Number(el('x'+i).value),Number(el('y'+i).value)]),points:points.map(p=>p.length===4?p:[]),adjustments:[0,1,2].map(i=>[Number(el('angle'+i).value),Number(el('scale'+i).value)])};}
+async function post(action,body,signal){return fetch('/api/'+action,{method:'POST',headers:{'Content-Type':'application/json','X-Rig-Request':'1'},body:JSON.stringify(body),signal});}
+function drawPoints(i){const c=el('points'+i),ctx=c.getContext('2d');ctx.clearRect(0,0,640,480);if(rawImages[i])ctx.drawImage(rawImages[i],0,0,640,480);points[i].forEach(([x,y],n)=>{ctx.beginPath();ctx.arc(x,y,7,0,Math.PI*2);ctx.strokeStyle='#ffdf30';ctx.lineWidth=2;ctx.stroke();ctx.font='bold 22px sans-serif';ctx.lineWidth=4;ctx.strokeStyle='black';ctx.strokeText(String(n+1),x+10,y-8);ctx.fillStyle='#ffdf30';ctx.fillText(String(n+1),x+10,y-8);});el('count'+i).textContent=points[i].length+'/4';}
+function undoPoint(i){points[i].pop();drawPoints(i);queuePreview();}
+function clearPoints(i){points[i]=[];drawPoints(i);queuePreview();}
+let pixelCursor=null;
+function cursorAt(i,e){const r=el('points'+i).getBoundingClientRect();return {i,x:Math.max(0,Math.min(639,Math.floor((e.clientX-r.left)*640/r.width))),y:Math.max(0,Math.min(479,Math.floor((e.clientY-r.top)*480/r.height))),clientX:e.clientX,clientY:e.clientY};}
+function hideLoupe(){el('pixelLoupe').hidden=true;}
+function showLoupe(){
+ if(!pixelCursor||!rawImages[pixelCursor.i]){hideLoupe();return;}
+ const {i,x,y,clientX,clientY}=pixelCursor,c=el('pixelLoupeCanvas'),ctx=c.getContext('2d'),size=224,zoom=8,center=size/2;
+ ctx.fillStyle='#101820';ctx.fillRect(0,0,size,size);ctx.imageSmoothingEnabled=false;
+ // Center the selected pixel, including at image boundaries. Outside-image space stays dark.
+ ctx.drawImage(rawImages[i],center-(x+.5)*zoom,center-(y+.5)*zoom,640*zoom,480*zoom);
+ ctx.strokeStyle='rgba(255,255,255,.18)';ctx.lineWidth=1;ctx.beginPath();
+ for(let v=center%zoom-zoom/2;v<size;v+=zoom){ctx.moveTo(v+.5,0);ctx.lineTo(v+.5,size);ctx.moveTo(0,v+.5);ctx.lineTo(size,v+.5);}ctx.stroke();
+ ctx.strokeStyle='#000';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(center,0);ctx.lineTo(center,size);ctx.moveTo(0,center);ctx.lineTo(size,center);ctx.stroke();
+ ctx.strokeStyle='#ffdf30';ctx.lineWidth=1;ctx.stroke();ctx.strokeRect(center-zoom/2,center-zoom/2,zoom,zoom);
+ el('pixelLoupeLabel').textContent=`cam${i+1} · X:${x} Y:${y} · 8×`;
+ const box=el('pixelLoupe');box.hidden=false;
+ const w=box.offsetWidth,h=box.offsetHeight;
+ let left=clientX+24,top=clientY+24;
+ if(left+w>window.innerWidth-8)left=clientX-w-24;
+ if(top+h>window.innerHeight-8)top=clientY-h-24;
+ box.style.left=Math.max(8,Math.min(left,window.innerWidth-w-8))+'px';
+ box.style.top=Math.max(8,Math.min(top,window.innerHeight-h-8))+'px';
+}
+function startKeyboard(i){
+ if(!rawImages[i]){el('pointStatus').textContent='원본 영상 로딩 후 키보드 선택을 시작하세요.';return;}
+ if(!pixelCursor||pixelCursor.i!==i){const r=el('points'+i).getBoundingClientRect();pixelCursor={i,x:320,y:240,clientX:r.left+r.width/2,clientY:r.top+r.height/2};}
+ el('points'+i).focus({preventScroll:true});showLoupe();
+ el('pointStatus').textContent=`cam${i+1}: 방향키로 1픽셀 이동 · Enter로 점 저장 · Esc로 돋보기 닫기`;
+}
+function selectPixel(){if(!pixelCursor)return;const {i,x,y}=pixelCursor;if(!rawImages[i]||points[i].length>=4)return;points[i].push([x,y]);drawPoints(i);el('pointStatus').textContent=`cam${i+1} 점 ${points[i].length}/4 저장: X=${x}, Y=${y}`+(points[i].length===4?' — 다음 카메라를 선택하세요.':' — 마우스 또는 방향키로 다음 위치를 지정하세요.');queuePreview();}
+[0,1,2].forEach(i=>{const c=el('points'+i);
+ c.addEventListener('pointerenter',e=>{if(!rawImages[i])return;pixelCursor=cursorAt(i,e);startKeyboard(i);});
+ c.addEventListener('focus',()=>{if(rawImages[i]){if(!pixelCursor||pixelCursor.i!==i){const r=c.getBoundingClientRect();pixelCursor={i,x:320,y:240,clientX:r.left+r.width/2,clientY:r.top+r.height/2};}showLoupe();}});
+ c.addEventListener('pointermove',e=>{pixelCursor=cursorAt(i,e);showLoupe();});
+ c.addEventListener('pointerleave',hideLoupe);
+ c.addEventListener('blur',hideLoupe);
+ c.addEventListener('click',e=>{c.focus({preventScroll:true});pixelCursor=cursorAt(i,e);showLoupe();selectPixel();});
+ c.addEventListener('keydown',e=>{
+  const delta={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[e.key];
+  if(!delta&&e.key!=='Enter'&&e.key!=='Escape')return;e.preventDefault();
+  if(e.key==='Escape'){hideLoupe();return;}if(!rawImages[i])return;
+  if(!pixelCursor||pixelCursor.i!==i){const r=c.getBoundingClientRect();pixelCursor={i,x:320,y:240,clientX:r.left+r.width/2,clientY:r.top+r.height/2};}
+  if(delta){pixelCursor.x=Math.max(0,Math.min(639,pixelCursor.x+delta[0]));pixelCursor.y=Math.max(0,Math.min(479,pixelCursor.y+delta[1]));}
+  else if(!e.repeat)selectPixel();showLoupe();
+ });
+});
+window.addEventListener('scroll',hideLoupe,true);window.addEventListener('resize',hideLoupe);
+
+async function rawFrames(){const version=++rawVersion;hideLoupe();pixelCursor=null;rawImages.forEach(image=>{if(image)image.close();});rawImages=[null,null,null];[0,1,2].forEach(drawPoints);if(!el('sessions').value)return;el('pointStatus').textContent='원본 프레임 읽는 중…';try{await Promise.all([0,1,2].map(async i=>{const body={...payload(),raw:i,points:[[],[],[]],adjustments:[[0,1],[0,1],[0,1]]};const r=await post('preview',body);if(!r.ok)throw Error((await r.json()).error);const image=await createImageBitmap(await r.blob());if(version!==rawVersion){image.close();return;}rawImages[i]=image;drawPoints(i);}));if(version===rawVersion)el('pointStatus').textContent='각 영상에서 같은 특징점 4개를 같은 순서로 클릭하세요.';}catch(e){if(version===rawVersion)el('pointStatus').textContent=String(e);}}
+async function selectedSession(){const name=el('sessions').value;loadedSession=name;el('dynamic').checked=false;el('globalStabilization').checked=false;el('localRefinement').checked=false;el('registrationMethod').value='orb';el('stabilization').value='balanced';el('temporalWindow').value='31';registrationBackup=null;el('autoReport').textContent='';points=[[],[],[]];[0,1,2].forEach(i=>{el('x'+i).value=0;el('y'+i).value=0;el('angle'+i).value=0;el('scale'+i).value=1;});try{if(name){const r=await post('preview',{session:name,load_profile:true});if(!r.ok)throw Error((await r.json()).error);const saved=await r.json();if(el('sessions').value!==name)return;el('dynamic').checked=saved.dynamic===true;el('globalStabilization').checked=false;el('localRefinement').checked=false;el('registrationMethod').value='orb';el('stabilization').value=saved.stabilization||'balanced';el('temporalWindow').value=String(saved.temporal_window??31);if(saved.points)points=saved.points;if(saved.rgb_cameras)saved.rgb_cameras.forEach((v,i)=>el('map'+i).value=v);if(saved.xy_offsets)saved.xy_offsets.forEach((v,i)=>{el('x'+i).value=v[0];el('y'+i).value=v[1];});if(saved.adjustments)saved.adjustments.forEach((v,i)=>{el('angle'+i).value=v[0];el('scale'+i).value=v[1];});}}catch(e){el('result').textContent=String(e);}await rawFrames();queuePreview();}
+async function sessions(){const names=await(await fetch('/api/sessions')).json();const old=el('sessions').value;el('sessions').replaceChildren(...names.map(n=>new Option(n,n)));if(names.includes(old))el('sessions').value=old;if(loadedSession!==el('sessions').value)await selectedSession();else queuePreview();}
+async function act(action,body={}){try{const r=await post(action,body);const data=await r.json();el('result').textContent=JSON.stringify(data,null,2);await sessions();}catch(e){el('result').textContent=String(e);}}
+let registrationBackup=null;
+function registrationSnapshot(){return {session:el('sessions').value,points:JSON.parse(JSON.stringify(points)),offsets:payload().offsets,adjustments:payload().adjustments};}
+function applyRegistration(state){points=state.points;[0,1,2].forEach(i=>{el('x'+i).value=state.offsets[i][0];el('y'+i).value=state.offsets[i][1];el('angle'+i).value=state.adjustments[i][0];el('scale'+i).value=state.adjustments[i][1];drawPoints(i);});queuePreview();}
+function restoreRegistration(){if(!registrationBackup||registrationBackup.session!==el('sessions').value){el('autoReport').textContent='이 세션에 복원할 설정이 없습니다.';return;}applyRegistration(registrationBackup);el('autoReport').textContent='이전 정합 설정을 복원했습니다.';}
+async function autoRegister(){
+ const session=el('sessions').value,position=el('position').value;
+ if(!session){el('autoReport').textContent='완료된 세션을 선택하세요.';return;}
+ const before=registrationSnapshot();el('autoRegister').disabled=true;el('autoReport').textContent='특징점 분석 중…';
+ try{const r=await post('preview',{...payload(),points:[[],[],[]],adjustments:[[0,1],[0,1],[0,1]],auto_register:true});const result=await r.json();if(!r.ok)throw Error(result.error);
+ if(session!==el('sessions').value||position!==el('position').value||JSON.stringify(before)!==JSON.stringify(registrationSnapshot())){el('autoReport').textContent='장면이 바뀌어 결과를 적용하지 않았습니다. 다시 실행하세요.';return;}
+ registrationBackup=before;applyRegistration({points:result.points,offsets:[[0,0],[0,0],[0,0]],adjustments:[[0,1],[0,1],[0,1]]});
+ el('autoReport').textContent=result.reports.map(r=>`cam${r.camera}: 유효점 ${r.inliers}/${r.matches}, 중앙 오차 ${r.median_error_px}px, 분포 ${r.coverage_percent}%`).join('\n')+'\n'+result.note+'\n표시된 4점은 계산한 변환의 제어점입니다. 중첩 결과를 확인한 뒤 합성 저장하세요.';
+ }catch(e){el('autoReport').textContent='자동 정합 실패 — 기존 설정 유지: '+String(e);}finally{el('autoRegister').disabled=false;}
+}
+function queuePreview(){clearTimeout(previewTimer);previewTimer=setTimeout(preview,250);}
+async function preview(){
+ if(previewController)previewController.abort();
+ if(!el('sessions').value)return;
+ if(points.some(p=>p.length>0&&p.length<4)){el('previewStatus').textContent='선택 중인 카메라의 대응점 4개를 완성하거나 초기화하세요.';return;}
+ const controller=new AbortController();previewController=controller;
+ el('previewStatus').textContent='미리보기 생성 중…';
+ try{const r=await post('preview',payload(),controller.signal);if(!r.ok)throw Error((await r.json()).error);
+ const blob=await r.blob();if(controller.signal.aborted)return;
+ const url=URL.createObjectURL(blob);el('alignment').src=url;if(previewUrl)URL.revokeObjectURL(previewUrl);previewUrl=url;
+ el('previewStatus').textContent='보정된 중첩 영상입니다. 정합이 맞으면 합성 영상 저장을 누르세요.';
+ }catch(e){if(e.name!=='AbortError')el('previewStatus').textContent=String(e);}
+}
+el('sessions').addEventListener('change',selectedSession);
+el('globalStabilization').addEventListener('change',()=>{if(el('globalStabilization').checked){el('dynamic').checked=true;el('localRefinement').checked=false;}});
+el('localRefinement').addEventListener('change',()=>{if(el('localRefinement').checked){el('dynamic').checked=true;el('globalStabilization').checked=false;}});
+let rawTimer;el('position').addEventListener('input',()=>{clearTimeout(rawTimer);rawTimer=setTimeout(()=>{rawFrames();queuePreview();},300);});
+['map0','map1','map2',...[0,1,2].flatMap(i=>['x','y','angle','scale'].map(k=>k+i))].forEach(id=>el(id).addEventListener('input',queuePreview));
+async function merge(){if(points.some(p=>p.length>0&&p.length<4)){el('result').textContent='대응점 4개를 완성하거나 초기화하세요.';return;}el('compose').disabled=true;el('result').textContent='합성 중…';try{await act('compose',payload());}finally{el('compose').disabled=false;}}
+async function startLive(){try{const r=await post('live/start',{...payload(),flow_width:Number(el('liveWidth').value),target_fps:Number(el('liveFps').value)});const data=await r.json();if(!r.ok)throw Error(data.error);updateLive(data);}catch(e){el('liveStatus').textContent=String(e);}}
+async function stopLive(){try{const r=await post('live/stop',{});updateLive(await r.json());}catch(e){el('liveStatus').textContent=String(e);}}
+function showLiveProfile(profile,file){
+ if(!profile||!profile.measured_frames){el('liveProfile').textContent=`예열/대기: ${profile?.outputs_seen||0}프레임 (첫 5프레임 제외)`;return;}
+ const labels={frame_pick_ms:'프레임 선택/잠금 대기',grayscale_ms:'회색조 변환',global_ms:'전역 정합 갱신',global_warp_ms:'전역 영상 변환',local_prep_ms:'축소/CLAHE',dis_forward_ms:'DIS 정방향',dis_reverse_ms:'DIS 역방향 검사',local_warp_ms:'국소 흐름 확대/변형',consistency_ms:'일관성 계산',merge_ms:'RGB 합성',jpeg_ms:'JPEG 인코딩',other_ms:'기타 처리',total_ms:'전체 처리'};
+ const rows=Object.entries(labels).map(([key,label])=>{const s=profile.stages[key];return s?`${label}: 평균 ${s.mean_ms.toFixed(2)} / 실행 시 ${s.active_mean_ms.toFixed(2)} / P95 ${s.p95_recent_ms.toFixed(2)} ms`:'';});
+ const groups=Object.entries(profile.groups).map(([key,g])=>`${key}: ${g.count}프레임 · 평균 ${g.mean_ms.toFixed(2)} / 최대 ${g.max_ms.toFixed(2)} ms`);
+ el('liveProfile').textContent=`측정 ${profile.measured_frames}프레임 · P95 표본 ${profile.percentile_window_frames}프레임\n`+rows.join('\n')+'\n\n프레임 유형별 전체 처리\n'+groups.join('\n')+(file?'\n\n저장: '+file:'');
+}
+function updateLive(live){if(!live)return;showLiveProfile(live.profile,live.profile_file);const img=el('liveImage');if(live.running){if(!img.hasAttribute('src'))img.src='/live/stream?t='+Date.now();img.hidden=false;}else{img.removeAttribute('src');img.hidden=true;}
+const confidence=live.consistency==null?'아직 검사 전':`${(live.consistency*100).toFixed(1)}% (처리 ${live.consistency_frame}번 프레임 검사)`;
+el('liveStatus').textContent=(live.running?'실행 중':'중지됨')+` · 목표 ${live.target_fps||'-'} fps · 처리 ${live.fps||0} fps\n처리 시간 ${live.processing_ms??'-'} ms · 호스트 수신 후 경과 ${live.host_age_ms??'-'} ms · 카메라 시간 차 ${live.camera_skew_ms??'-'} ms\n처리 ${live.processed||0}프레임 · cam1 처리 생략 ${live.skipped_cam1||0}프레임\n왕복 일관성 ${confidence}`+(live.warning?'\n'+live.warning:'');}
+async function status(){try{const s=await(await fetch('/api/status')).json();updateLive(s.live);s.cameras.forEach((c,i)=>el('status'+i).textContent=c.error||`${c.fps} fps · ${c.frames} frames`);const p=s.processing;if(p)el('composeProgress').textContent=p.error?'합성 오류: '+p.error:p.total?`${p.running?(p.phase||'합성 중'):'합성 완료'}: ${p.done}/${p.total} · 자동 정합 ${p.estimated} · 대체값 사용 ${p.fallback}`:p.running?'합성 준비 중…':'';el('record').textContent=s.recording?'녹화 중: '+s.recording:'대기';}catch(e){el('record').textContent='서버 연결 끊김';}setTimeout(status,1000);}sessions();status();
+</script></html>

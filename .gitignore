@@ -1,3 +1,7 @@
 .venv/
 __pycache__/
 captures/
+
+captures_cpp/
+cpp/build/
+benchmarks/

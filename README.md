@@ -1,5 +1,8 @@
 # RaspberryPi Multispectral Imaging
 
+독립 C++ 버전과 Python/C++ 비교 방법은 [cpp/README.md](cpp/README.md)를 참고하세요.
+Python 기준 프로그램은 유지되며 C++ 서버의 기본 포트는 8001입니다.
+
 Raspberry Pi 5 + USB 카메라 3대용 로컬 브라우저 프로그램.
 현재 기능: 3채널 미리보기, 동시 녹화 시작/중지, 카메라별 AVI/시간 CSV 저장,
 완료된 세션의 시간 기반 RGB 합성, 카메라별 4점 원근 정합, 회전·배율·X/Y 이동 설정 저장.
