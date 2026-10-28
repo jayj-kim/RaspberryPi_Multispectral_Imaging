@@ -748,7 +748,7 @@ class RealtimeComposer:
         width=body.get('flow_width',320)
         fps=body.get('target_fps',5)
         if type(width)is not int or width not in (320,480,640):raise ValueError('계산 폭은 320/480/640입니다')
-        if type(fps)is not int or fps not in (5,10):raise ValueError('목표 속도는 5/10fps입니다')
+        if type(fps)is not int or fps not in (5,10,15,20,30):raise ValueError('목표 속도는 5/10/15/20/30fps입니다')
         matrices=registration_matrices(body.get('points'),body.get('adjustments'))
         with self.lock:
             if self.thread and self.thread.is_alive():raise ValueError('실시간 합성이 이미 실행 중입니다')

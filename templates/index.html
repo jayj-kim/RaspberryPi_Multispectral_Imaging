@@ -7,7 +7,7 @@
 <p><button onclick="act('start')">녹화 시작</button><button onclick="act('stop')">녹화 중지</button><span id="record"></span></p>
 <h2>실시간 합성 미리보기</h2>
 <p><label>국소 계산 폭 <select id="liveWidth"><option value="320" selected>320 — 속도 우선</option><option value="480">480 — 중간</option><option value="640">640 — 세부 정합 우선</option></select></label>
-<label>목표 속도 <select id="liveFps"><option value="5" selected>5 fps</option><option value="10">10 fps</option></select></label></p>
+<label>목표 속도 <select id="liveFps"><option value="5" selected>5 fps</option><option value="10">10 fps</option><option value="15">15 fps</option><option value="20">20 fps</option><option value="30">30 fps</option></select></label></p>
 <p><button onclick="startLive()">실시간 합성 시작</button><button onclick="stopLive()">실시간 합성 중지</button></p>
 <img id="liveImage" hidden alt="실시간 합성 대기" style="max-width:960px">
 <pre id="liveStatus" role="status">중지됨</pre>

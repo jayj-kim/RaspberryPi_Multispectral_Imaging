@@ -98,9 +98,11 @@ class WorkflowTest(unittest.TestCase):
                 stopped=client.post('/api/live/stop',headers=headers)
                 self.assertFalse(stopped.json['running'])
                 self.assertFalse(rig.live.thread.is_alive())
-                restarted=client.post('/api/live/start',headers=headers,json={'target_fps':10,'flow_width':320})
-                self.assertEqual(restarted.status_code,200)
-                client.post('/api/live/stop',headers=headers)
+                for fps in (10,15,20,30):
+                    restarted=client.post('/api/live/start',headers=headers,json={'target_fps':fps,'flow_width':320})
+                    self.assertEqual(restarted.status_code,200,restarted.json)
+                    self.assertEqual(restarted.json['target_fps'],fps)
+                    client.post('/api/live/stop',headers=headers)
                 self.assertTrue(all(len(history)<=8 for history in rig.history))
             finally:rig.close()
 
