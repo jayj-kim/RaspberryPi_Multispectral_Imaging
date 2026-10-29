@@ -40,6 +40,9 @@ def main():
                 diagnostics=json.loads(data)
                 assert diagnostics['demo'] is True and len(diagnostics['cameras'])==3
                 assert diagnostics['current_controls']==[]
+                for value in [-1,256,1.5,'140',140]:
+                    assert request('/api/cameras/brightness',{'brightness':value})[0]==400
+                assert request('/api/cameras/brightness',{'brightness':140},headers={})[0]==403
                 assert request('/api/live/start',{},headers={})[0]==403
                 assert request('/api/live/start',{},headers={'X-Rig-Request':'1','Origin':'https://example.com'})[0]==403
                 for _ in range(100):

@@ -83,6 +83,63 @@ static json cameraSettings(int index, bool applyExposure) {
 #endif
   return result;
 }
+static void applyCameraBrightness(int value) {
+  require(value >= 0 && value <= 255, "Brightness must be an integer from 0 to 255");
+#ifdef __linux__
+  std::array<int, 3> descriptors{{-1, -1, -1}}, previous{};
+  int touched = 0;
+  auto closeAll = [&] {
+    for (int fd : descriptors)
+      if (fd >= 0)
+        ::close(fd);
+  };
+  try {
+    // Validate all three devices before changing any of them.
+    for (int i = 0; i < 3; ++i) {
+      int fd = descriptors[i] = ::open(devices[i].c_str(), O_RDWR | O_NONBLOCK);
+      require(fd >= 0, "Cannot open cam" + std::to_string(i + 1));
+      v4l2_queryctrl query{};
+      query.id = V4L2_CID_BRIGHTNESS;
+      require(ioctl(fd, VIDIOC_QUERYCTRL, &query) == 0 &&
+                  !(query.flags & (V4L2_CTRL_FLAG_DISABLED | V4L2_CTRL_FLAG_READ_ONLY)) &&
+                  value >= query.minimum && value <= query.maximum && query.step > 0 &&
+                  (value - query.minimum) % query.step == 0,
+              "Requested brightness unsupported by cam" + std::to_string(i + 1));
+      v4l2_control control{};
+      control.id = V4L2_CID_BRIGHTNESS;
+      require(ioctl(fd, VIDIOC_G_CTRL, &control) == 0, "Cannot read current brightness");
+      previous[i] = control.value;
+    }
+    for (int i = 0; i < 3; ++i) {
+      touched = i + 1;
+      v4l2_control control{};
+      control.id = V4L2_CID_BRIGHTNESS;
+      control.value = value;
+      require(ioctl(descriptors[i], VIDIOC_S_CTRL, &control) == 0,
+              "Cannot set brightness on cam" + std::to_string(i + 1));
+      require(ioctl(descriptors[i], VIDIOC_G_CTRL, &control) == 0 && control.value == value,
+              "Brightness readback mismatch on cam" + std::to_string(i + 1));
+    }
+    closeAll();
+  } catch (const std::exception &e) {
+    std::string error = e.what();
+    for (int i = 0; i < touched; ++i) {
+      v4l2_control control{};
+      control.id = V4L2_CID_BRIGHTNESS;
+      control.value = previous[i];
+      bool restored = ioctl(descriptors[i], VIDIOC_S_CTRL, &control) == 0;
+      restored = ioctl(descriptors[i], VIDIOC_G_CTRL, &control) == 0 &&
+                 control.value == previous[i] && restored;
+      if (!restored)
+        error += "; could not restore cam" + std::to_string(i + 1);
+    }
+    closeAll();
+    throw std::runtime_error(error);
+  }
+#else
+  throw std::runtime_error("V4L2 brightness control requires Linux");
+#endif
+}
 std::string timestamp() {
   auto t = std::chrono::system_clock::now();
   auto v = std::chrono::system_clock::to_time_t(t);
@@ -520,6 +577,22 @@ int serve(fs::path output, bool demo, int port, const fs::path &web,
       for (int i = 0; i < 3; ++i)
         data["current_controls"].push_back(cameraSettings(i, false));
     r.set_header("Content-Disposition", "attachment; filename=camera_settings.json");
+    reply(r, data);
+  });
+  server.Post("/api/cameras/brightness", [&](const auto &q, auto &r) {
+    std::unique_lock<std::mutex> guard(job, std::try_to_lock);
+    require(guard.owns_lock(), "Another operation is running");
+    json body = json::parse(q.body);
+    require(body.contains("brightness") && body["brightness"].is_number_integer(),
+            "Brightness must be an integer from 0 to 255");
+    auto value = body["brightness"].get<int64_t>();
+    require(value >= 0 && value <= 255, "Brightness must be an integer from 0 to 255");
+    require(!demo, "Hardware brightness control is unavailable in demo mode");
+    require(rig.status()["recording"].is_null(), "Stop recording before changing brightness");
+    applyCameraBrightness(int(value));
+    json data = {{"brightness", value}, {"cameras", json::array()}};
+    for (int i = 0; i < 3; ++i)
+      data["cameras"].push_back(cameraSettings(i, false));
     reply(r, data);
   });
   server.Get("/api/vulkan", [&](const auto &, auto &r) { reply(r, vulkanInfo()); });

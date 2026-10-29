@@ -4,6 +4,8 @@
 <h1>3 Camera Studio C++ __DEMO__</h1>
 <p>USB 카메라 촬영 · 저장 영상 RGB 합성</p>
 <section><article><h2>cam1</h2><img src="/stream/0" alt="카메라 연결 대기"><p id="status0">연결 중</p></article><article><h2>cam2</h2><img src="/stream/1" alt="카메라 연결 대기"><p id="status1">연결 중</p></article><article><h2>cam3</h2><img src="/stream/2" alt="카메라 연결 대기"><p id="status2">연결 중</p></article></section>
+<p><label>세 카메라 공통 밝기 <input id="cameraBrightness" type="number" min="0" max="255" step="1" value="140"></label><button onclick="applyBrightness()">밝기 적용</button><span id="brightnessStatus" role="status"></span></p>
+<p><small>이전에 확인한 카메라 밝기 기본값은 120입니다. 140부터 확인하고 필요하면 160으로 올리세요. 버튼을 누를 때 원본 입력에 적용되며 노출은 4500을 유지합니다. 밝은 부분이 하얗게 뭉개지면 값을 낮추세요. 녹화 중에는 변경할 수 없습니다.</small></p>
 <p><a href="/api/cameras/settings" download="camera_settings.json" style="color:#92dec8">카메라 실제 설정 JSON 다운로드</a> · 노출·밝기·게인·화이트밸런스와 연결 장치를 확인합니다.</p>
 <p><button onclick="act('start')">녹화 시작</button><button onclick="act('stop')">녹화 중지</button><span id="record"></span></p>
 <h2>실시간 합성 미리보기</h2>
@@ -74,6 +76,7 @@ function changeRgbMapping(channel){
 let points=[[],[],[]], rawImages=[null,null,null], rawVersion=0;
 let previewTimer, previewController, previewUrl, loadedSession=null;
 function payload(){return {local_refinement:el('localRefinement').checked,temporal_window:Number(el('temporalWindow').value),registration_method:el('registrationMethod').value,global_stabilization:el('globalStabilization').checked,stabilization:el('stabilization').value,dynamic:el('dynamic').checked,session:el('sessions').value,position:Number(el('position').value),mapping:[0,1,2].map(i=>Number(el('map'+i).value)),offsets:[0,1,2].map(i=>[Number(el('x'+i).value),Number(el('y'+i).value)]),points:points.map(p=>p.length===4?p:[]),adjustments:[0,1,2].map(i=>[Number(el('angle'+i).value),Number(el('scale'+i).value)])};}
+async function applyBrightness(){const out=el('brightnessStatus');try{const value=Number(el('cameraBrightness').value);if(!Number.isInteger(value)||value<0||value>255)throw Error('0~255 사이의 정수를 입력하세요');out.textContent='적용 중…';const r=await post('cameras/brightness',{brightness:value});const data=await r.json();if(!r.ok)throw Error(data.error);out.textContent=data.cameras.map((c,i)=>`cam${i+1}: ${c.controls?.brightness??'읽기 실패'}`).join(' · ');}catch(e){out.textContent=String(e);}}
 async function post(action,body,signal){return fetch('/api/'+action,{method:'POST',headers:{'Content-Type':'application/json','X-Rig-Request':'1'},body:JSON.stringify(body),signal});}
 function drawPoints(i){const c=el('points'+i),ctx=c.getContext('2d');ctx.clearRect(0,0,640,480);if(rawImages[i])ctx.drawImage(rawImages[i],0,0,640,480);points[i].forEach(([x,y],n)=>{ctx.beginPath();ctx.arc(x,y,7,0,Math.PI*2);ctx.strokeStyle='#ffdf30';ctx.lineWidth=2;ctx.stroke();ctx.font='bold 22px sans-serif';ctx.lineWidth=4;ctx.strokeStyle='black';ctx.strokeText(String(n+1),x+10,y-8);ctx.fillStyle='#ffdf30';ctx.fillText(String(n+1),x+10,y-8);});el('count'+i).textContent=points[i].length+'/4';}
 function undoPoint(i){points[i].pop();drawPoints(i);queuePreview();}
