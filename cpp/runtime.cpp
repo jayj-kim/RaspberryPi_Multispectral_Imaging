@@ -25,7 +25,8 @@ static void require(bool b, const std::string &s) {
 // Read controls without changing brightness, gain or white balance.
 static json cameraSettings(int index, bool applyExposure) {
   json result = {{"device", devices[index]},
-                 {"requested_exposure", 4500},
+                 {"requested_exposure", nullptr},
+                 {"requested_exposure_mode", 3},
                  {"controls", json::object()},
                  {"warning", nullptr}};
 #ifdef __linux__
@@ -42,14 +43,13 @@ static json cameraSettings(int index, bool applyExposure) {
   if (applyExposure) {
     v4l2_control control{};
     control.id = V4L2_CID_EXPOSURE_AUTO;
-    control.value = V4L2_EXPOSURE_MANUAL;
+    // These UVC cameras advertise aperture-priority (3) for automatic exposure.
+    control.value = V4L2_EXPOSURE_APERTURE_PRIORITY;
     int a = ioctl(fd, VIDIOC_S_CTRL, &control);
-    control.id = V4L2_CID_EXPOSURE_ABSOLUTE;
-    control.value = 4500;
-    int b = ioctl(fd, VIDIOC_S_CTRL, &control);
-    if (a != 0 || b != 0) {
+    if (a != 0) {
       ::close(fd);
-      throw std::runtime_error("Cannot set manual exposure 4500 after stream start");
+      throw std::runtime_error(
+          "Cannot enable automatic exposure (aperture priority, mode 3) after stream start");
     }
   }
   const std::pair<const char *, unsigned> controls[] = {
@@ -72,11 +72,10 @@ static json cameraSettings(int index, bool applyExposure) {
   }
   ::close(fd);
   const auto &values = result["controls"];
-  if (values["auto_exposure"].is_null() || values["exposure_time_absolute"].is_null())
+  if (values["auto_exposure"].is_null())
     result["warning"] = "Camera exposure readback unavailable";
-  else if (values["auto_exposure"] != V4L2_EXPOSURE_MANUAL ||
-           values["exposure_time_absolute"] != 4500)
-    result["warning"] = "Camera exposure differs from requested manual 4500";
+  else if (values["auto_exposure"] != V4L2_EXPOSURE_APERTURE_PRIORITY)
+    result["warning"] = "Camera exposure differs from requested automatic mode 3";
 #else
   (void)applyExposure;
   result["warning"] = "V4L2 settings unavailable on this platform";
@@ -187,7 +186,7 @@ void Rig::capture(int i) {
       cap.set(cv::CAP_PROP_FRAME_HEIGHT, 480);
       cap.set(cv::CAP_PROP_FPS, 30);
       // Opening/configuring the device can reset controls. Start streaming first,
-      // then set exposure while the capture descriptor stays open.
+      // then enable automatic exposure while the capture descriptor stays open.
       cv::Mat warmup;
       require(cap.read(warmup), "Cannot start camera stream before applying exposure");
       auto settings = cameraSettings(i, true);
