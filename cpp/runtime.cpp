@@ -25,8 +25,8 @@ static void require(bool b, const std::string &s) {
 // Read controls without changing brightness, gain or white balance.
 static json cameraSettings(int index, bool applyExposure) {
   json result = {{"device", devices[index]},
-                 {"requested_exposure", nullptr},
-                 {"requested_exposure_mode", 3},
+                 {"requested_exposure", 5000},
+                 {"requested_exposure_mode", 1},
                  {"controls", json::object()},
                  {"warning", nullptr}};
 #ifdef __linux__
@@ -43,13 +43,14 @@ static json cameraSettings(int index, bool applyExposure) {
   if (applyExposure) {
     v4l2_control control{};
     control.id = V4L2_CID_EXPOSURE_AUTO;
-    // These UVC cameras advertise aperture-priority (3) for automatic exposure.
-    control.value = V4L2_EXPOSURE_APERTURE_PRIORITY;
+    control.value = V4L2_EXPOSURE_MANUAL;
     int a = ioctl(fd, VIDIOC_S_CTRL, &control);
-    if (a != 0) {
+    control.id = V4L2_CID_EXPOSURE_ABSOLUTE;
+    control.value = 5000;
+    int b = a == 0 ? ioctl(fd, VIDIOC_S_CTRL, &control) : -1;
+    if (a != 0 || b != 0) {
       ::close(fd);
-      throw std::runtime_error(
-          "Cannot enable automatic exposure (aperture priority, mode 3) after stream start");
+      throw std::runtime_error("Cannot set manual exposure 5000 after stream start");
     }
   }
   const std::pair<const char *, unsigned> controls[] = {
@@ -72,10 +73,11 @@ static json cameraSettings(int index, bool applyExposure) {
   }
   ::close(fd);
   const auto &values = result["controls"];
-  if (values["auto_exposure"].is_null())
+  if (values["auto_exposure"].is_null() || values["exposure_time_absolute"].is_null())
     result["warning"] = "Camera exposure readback unavailable";
-  else if (values["auto_exposure"] != V4L2_EXPOSURE_APERTURE_PRIORITY)
-    result["warning"] = "Camera exposure differs from requested automatic mode 3";
+  else if (values["auto_exposure"] != V4L2_EXPOSURE_MANUAL ||
+           values["exposure_time_absolute"] != 5000)
+    result["warning"] = "Camera exposure differs from requested manual 5000";
 #else
   (void)applyExposure;
   result["warning"] = "V4L2 settings unavailable on this platform";
@@ -186,7 +188,7 @@ void Rig::capture(int i) {
       cap.set(cv::CAP_PROP_FRAME_HEIGHT, 480);
       cap.set(cv::CAP_PROP_FPS, 30);
       // Opening/configuring the device can reset controls. Start streaming first,
-      // then enable automatic exposure while the capture descriptor stays open.
+      // then apply manual exposure 5000 while the capture descriptor stays open.
       cv::Mat warmup;
       require(cap.read(warmup), "Cannot start camera stream before applying exposure");
       auto settings = cameraSettings(i, true);
@@ -327,6 +329,8 @@ void Live::start(json body) {
   int width = body.value("flow_width", 320), fps = body.value("target_fps", 5);
   std::string backend = body.value("compute_backend", std::string("cpu"));
   require(backend == "cpu" || backend == "auto" || backend == "vulkan", "Invalid compute backend");
+  require(!body.contains("async_global") || body["async_global"].is_boolean(),
+          "Invalid async global setting");
   std::string cpuRemap = body.value("cpu_remap", std::string("float"));
   require(cpuRemap == "float" || cpuRemap == "fixed", "Invalid CPU remap mode");
   require(width == 320 || width == 480 || width == 640, "Invalid calculation width");
@@ -354,13 +358,10 @@ void Live::start(json body) {
     halt = false;
     jpeg.clear();
     sequence = 0;
-    json c = {{"cpu_remap", cpuRemap},
-              {"flow_width", width},
-              {"compute_backend", backend},
-              {"target_fps", fps},
-              {"implementation", "C++"},
-              {"opencv", CV_VERSION},
-              {"opencv_threads", cv::getNumThreads()},
+    json c = {{"cpu_remap", cpuRemap}, {"async_global", body.value("async_global", true)},
+              {"flow_width", width},   {"compute_backend", backend},
+              {"target_fps", fps},     {"implementation", "C++"},
+              {"opencv", CV_VERSION},  {"opencv_threads", cv::getNumThreads()},
               {"demo", rig.demo}};
     profile = Profile(c);
     metrics = {{"running", true},
@@ -428,12 +429,15 @@ void Live::run(json config) {
       }
       priorTime = published;
       processed++;
-      bool recording = rig.status()["recording"].is_string();
+      auto cameraState = rig.status();
+      bool recording = cameraState["recording"].is_string();
       int64_t oldest = std::min({frames[0].stamp, frames[1].stamp, frames[2].stamp}),
               newest = std::max({frames[0].stamp, frames[1].stamp, frames[2].stamp});
       {
         std::lock_guard<std::mutex> guard(mutex);
         profile.setBackend(result.backend);
+        profile.setGlobal(result.globalRegistration);
+        profile.setCameras(cameraState["cameras"]);
         profile.record(result.stages, result.stages["global_ms"].get<double>() > 0, result.checked,
                        recording);
         jpeg = std::move(encoded);
@@ -447,6 +451,7 @@ void Live::run(json config) {
         metrics["skipped_cam1"] = skipped;
         metrics["global_valid"] = result.globalValid;
         metrics["backend"] = result.backend;
+        metrics["global_registration"] = result.globalRegistration;
         metrics["consistency"] = result.consistency < 0 ? json(nullptr) : json(result.consistency);
         metrics["consistency_checked"] = result.checked;
         if (result.checked)

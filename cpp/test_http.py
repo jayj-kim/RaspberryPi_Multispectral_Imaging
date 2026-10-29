@@ -52,6 +52,7 @@ def main():
                 code,_,error=request('/api/live/start',{'mapping':[0,0,2]})
                 assert code==400 and 'R=cam1' in json.loads(error)['error']
                 assert request('/api/live/start',{'cpu_remap':'invalid'})[0]==400
+                assert request('/api/live/start',{'async_global':'invalid'})[0]==400
                 assert request('/api/live/start',{'flow_width':320,'target_fps':10,'cpu_remap':'fixed'})[0]==200
                 assert request('/api/live/start',{})[0]==400
                 assert request('/api/start',{})[0]==200
@@ -71,6 +72,11 @@ def main():
                 assert json.loads(profile)['outputs_seen']>0
                 assert json.loads(profile)['config']['local_backend']['cpu_remap']=='fixed'
                 assert 'cpu_map_convert_ms' in json.loads(profile)['stages']
+                assert json.loads(profile)['config']['async_global'] is True
+                assert json.loads(profile)['global_registration']['mode']=='async'
+                assert json.loads(profile)['global_registration']['completed']>0
+                assert len(json.loads(profile)['cameras'])==3
+                assert all(c['fps']>0 for c in json.loads(profile)['cameras'])
                 assert recorded in json.loads(request('/api/sessions')[2])
                 body={'session':recorded,'mapping':[0,1,2],'offsets':[[0,0]]*3}
                 code,headers,image=request('/api/preview',{**body,'raw':0})
@@ -81,7 +87,7 @@ def main():
                 output=json.loads(result)
                 assert Path(output['file']).is_file() and Path(output['validity_file']).is_file()
                 assert (Path(tmp)/recorded/'registration_smoothed.jsonl').is_file()
-                assert request('/api/live/start',{'target_fps':30})[0]==200
+                assert request('/api/live/start',{'target_fps':30,'async_global':False})[0]==200
                 assert request('/api/live/stop',{})[0]==200
                 print('PASS: native HTTP security, live MJPEG, recording, profile, sessions, preview, local offline composition, restart')
             except Exception:

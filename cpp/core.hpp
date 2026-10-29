@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 namespace imaging {
+class GlobalWorker;
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 using Images = std::array<cv::Mat, 3>;
@@ -105,12 +106,15 @@ class Profile {
   int seen = 0, count = 0, recordingCount = 0;
   json config, totals = json::object(), groups = json::object();
   std::deque<json> samples;
+  json globalStatus = nullptr, cameraStatus = nullptr;
 
 public:
   explicit Profile(json config = json::object());
   void record(const json &, bool refresh, bool check, bool recording = false);
   json summary() const;
   void setBackend(const json &);
+  void setGlobal(const json &);
+  void setCameras(const json &);
 };
 struct PipelineResult {
   cv::Mat image;
@@ -118,7 +122,7 @@ struct PipelineResult {
   bool checked = false;
   double consistency = -1;
   bool globalValid = false;
-  json backend;
+  json backend, globalRegistration;
   std::string warning;
 };
 class LivePipeline {
@@ -128,9 +132,14 @@ class LivePipeline {
   LocalRefiner local;
   double lastRefresh = -1e30;
   bool globalValid = false;
+  std::unique_ptr<GlobalWorker> worker;
+  std::string globalWarning;
+  uint64_t appliedGlobal = 0;
+  double lastResultAge = -1;
 
 public:
   explicit LivePipeline(json);
+  ~LivePipeline();
   PipelineResult process(const Images &bgr, double inputTime);
 };
 struct Session {

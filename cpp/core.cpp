@@ -1,5 +1,6 @@
 #include "core.hpp"
 #include "cpu_coords.hpp"
+#include "global_worker.hpp"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -697,6 +698,12 @@ void Profile::record(const json &stage, bool refresh, bool check, bool recording
   g["sum"] = g["sum"].get<double>() + stage["total_ms"].get<double>();
   g["max"] = std::max(g["max"].get<double>(), stage["total_ms"].get<double>());
 }
+void Profile::setCameras(const json &info) {
+  cameraStatus = info;
+}
+void Profile::setGlobal(const json &info) {
+  globalStatus = info;
+}
 void Profile::setBackend(const json &info) {
   config["local_backend"] = info;
 }
@@ -733,6 +740,8 @@ json Profile::summary() const {
                    {"mean_ms", it.value()["sum"].get<double>() / it.value()["count"].get<int>()},
                    {"max_ms", it.value()["max"]}};
   return {{"config", config},
+          {"cameras", cameraStatus},
+          {"global_registration", globalStatus},
           {"outputs_seen", seen},
           {"warmup_excluded", std::min(5, seen)},
           {"measured_frames", count},
@@ -744,6 +753,8 @@ json Profile::summary() const {
            {"Wall-clock timings; first five outputs excluded.",
             "Percentiles use latest 300 outputs; means/max cover full measured run.",
             "Camera exposure, target-rate waits, network and browser excluded.",
+            "In async mode global_ms is foreground submit/apply cost; worker time is reported "
+            "separately under global_registration.",
             "cpu_* and gpu_* are nested timings already included in parent stages; do not add "
             "twice."}}};
 }
@@ -751,7 +762,16 @@ LivePipeline::LivePipeline(json c)
     : h(registration(fallback(c, "points", nullptr), fallback(c, "adjustments", nullptr))),
       config(c), temporal(h, "responsive"),
       local(c.value("flow_width", 320), true, c.value("compute_backend", std::string("cpu")),
-            c.value("allow_software_vulkan", false), c.value("cpu_remap", std::string("float"))) {}
+            c.value("allow_software_vulkan", false), c.value("cpu_remap", std::string("float"))) {
+  if (c.value("async_global", true)) {
+    auto adjustments = fallback(c, "adjustments", nullptr);
+    worker = std::make_unique<GlobalWorker>([adjustments](const Images &gray) {
+      auto estimate = automatic(gray);
+      return registration(estimate.points, adjustments);
+    });
+  }
+}
+LivePipeline::~LivePipeline() = default;
 PipelineResult LivePipeline::process(const Images &bgr, double inputTime) {
   double begin = now(), tick = now();
   PipelineResult r;
@@ -760,18 +780,47 @@ PipelineResult LivePipeline::process(const Images &bgr, double inputTime) {
     cvtColor(bgr[i], gray[i], COLOR_BGR2GRAY);
   r.stages = {{"frame_pick_ms", 0.}, {"grayscale_ms", ms(tick)}, {"global_ms", 0.}};
   bool refresh = inputTime - lastRefresh >= 1;
-  if (refresh) {
-    lastRefresh = inputTime;
+  if (worker) {
     tick = now();
-    try {
-      auto estimate = automatic(gray);
-      auto candidate = registration(estimate.points, fallback(config, "adjustments", nullptr));
-      h = temporal.update(candidate).first;
-      globalValid = true;
-    } catch (const std::exception &e) {
-      r.warning = std::string("Global refresh failed; using prior correction: ") + e.what();
+    auto completed = worker->take(inputTime);
+    if (completed) {
+      if (completed->error.empty()) {
+        lastResultAge =
+            std::max(now() - completed->submitted, inputTime - completed->sourceTime) * 1000;
+        h = temporal.update(completed->matrices).first;
+        globalValid = true;
+        ++appliedGlobal;
+        globalWarning.clear();
+      } else {
+        globalWarning = "Global refresh failed; using prior correction: " + completed->error;
+      }
     }
-    r.stages["global_ms"] = ms(tick);
+    if (refresh) {
+      lastRefresh = inputTime;
+      worker->submit(gray, inputTime);
+    }
+    if (refresh || completed)
+      r.stages["global_ms"] = ms(tick);
+    r.warning = globalWarning;
+    r.globalRegistration = worker->status();
+    r.globalRegistration["applied"] = appliedGlobal;
+    r.globalRegistration["last_applied_result_age_ms"] =
+        lastResultAge < 0 ? json(nullptr) : json(lastResultAge);
+  } else {
+    if (refresh) {
+      lastRefresh = inputTime;
+      tick = now();
+      try {
+        auto estimate = automatic(gray);
+        auto candidate = registration(estimate.points, fallback(config, "adjustments", nullptr));
+        h = temporal.update(candidate).first;
+        globalValid = true;
+      } catch (const std::exception &e) {
+        r.warning = std::string("Global refresh failed; using prior correction: ") + e.what();
+      }
+      r.stages["global_ms"] = ms(tick);
+    }
+    r.globalRegistration = {{"mode", "synchronous"}};
   }
   if (!globalValid && r.warning.empty())
     r.warning = "Global alignment unverified; using initial correction";
@@ -1205,8 +1254,11 @@ json compare(const fs::path &folder) {
 json benchmark(const fs::path &folder, const json &config, const fs::path &report, int stride) {
   require(stride > 0, "Invalid stride");
   Session session(folder);
-  LivePipeline pipeline(config);
-  json metadata = config;
+  json benchmarkConfig = config;
+  // Synchronous source-time scheduling preserves reproducible video comparisons.
+  benchmarkConfig["async_global"] = false;
+  LivePipeline pipeline(benchmarkConfig);
+  json metadata = benchmarkConfig;
   metadata["implementation"] = "C++";
   metadata["opencv"] = CV_VERSION;
   metadata["opencv_build_info"] = getBuildInformation();
@@ -1232,6 +1284,7 @@ json benchmark(const fs::path &folder, const json &config, const fs::path &repor
     r.stages["jpeg_ms"] = elapsed;
     r.stages["total_ms"] = r.stages["total_ms"].get<double>() + elapsed;
     profile.setBackend(r.backend);
+    profile.setGlobal(r.globalRegistration);
     profile.record(r.stages, r.stages["global_ms"].get<double>() > 0, r.checked);
     writer.write(r.image);
   }
