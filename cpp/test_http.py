@@ -35,6 +35,11 @@ def main():
                     time.sleep(.05)
                 else:raise RuntimeError('Server did not start')
                 assert request('/')[0]==200
+                code,headers,data=request('/api/cameras/settings')
+                assert code==200 and 'attachment' in headers['Content-Disposition']
+                diagnostics=json.loads(data)
+                assert diagnostics['demo'] is True and len(diagnostics['cameras'])==3
+                assert diagnostics['current_controls']==[]
                 assert request('/api/live/start',{},headers={})[0]==403
                 assert request('/api/live/start',{},headers={'X-Rig-Request':'1','Origin':'https://example.com'})[0]==403
                 for _ in range(100):

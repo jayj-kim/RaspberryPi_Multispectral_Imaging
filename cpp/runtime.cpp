@@ -1,5 +1,7 @@
 #include "runtime.hpp"
+#include <cerrno>
 #include <csignal>
+#include <cstring>
 #include <ctime>
 #include <fstream>
 #include <httplib.h>
@@ -19,6 +21,67 @@ static const std::array<std::string, 3> devices = {
 static void require(bool b, const std::string &s) {
   if (!b)
     throw std::runtime_error(s);
+}
+// Read controls without changing brightness, gain or white balance.
+static json cameraSettings(int index, bool applyExposure) {
+  json result = {{"device", devices[index]},
+                 {"requested_exposure", 4500},
+                 {"controls", json::object()},
+                 {"warning", nullptr}};
+#ifdef __linux__
+  std::error_code ec;
+  auto resolved = fs::canonical(devices[index], ec);
+  if (!ec)
+    result["resolved_device"] = resolved.string();
+  int fd = ::open(devices[index].c_str(), O_RDWR | O_NONBLOCK);
+  if (fd < 0) {
+    result["warning"] = std::string("Cannot read camera settings: ") + std::strerror(errno);
+    require(!applyExposure, result["warning"].get<std::string>());
+    return result;
+  }
+  if (applyExposure) {
+    v4l2_control control{};
+    control.id = V4L2_CID_EXPOSURE_AUTO;
+    control.value = V4L2_EXPOSURE_MANUAL;
+    int a = ioctl(fd, VIDIOC_S_CTRL, &control);
+    control.id = V4L2_CID_EXPOSURE_ABSOLUTE;
+    control.value = 4500;
+    int b = ioctl(fd, VIDIOC_S_CTRL, &control);
+    if (a != 0 || b != 0) {
+      ::close(fd);
+      throw std::runtime_error("Cannot set manual exposure 4500 after stream start");
+    }
+  }
+  const std::pair<const char *, unsigned> controls[] = {
+      {"auto_exposure", V4L2_CID_EXPOSURE_AUTO},
+      {"exposure_time_absolute", V4L2_CID_EXPOSURE_ABSOLUTE},
+      {"brightness", V4L2_CID_BRIGHTNESS},
+      {"contrast", V4L2_CID_CONTRAST},
+      {"gamma", V4L2_CID_GAMMA},
+      {"gain", V4L2_CID_GAIN},
+      {"autogain", V4L2_CID_AUTOGAIN},
+      {"white_balance_automatic", V4L2_CID_AUTO_WHITE_BALANCE},
+      {"white_balance_temperature", V4L2_CID_WHITE_BALANCE_TEMPERATURE},
+      {"backlight_compensation", V4L2_CID_BACKLIGHT_COMPENSATION},
+      {"power_line_frequency", V4L2_CID_POWER_LINE_FREQUENCY}};
+  for (auto [name, id] : controls) {
+    v4l2_control control{};
+    control.id = id;
+    result["controls"][name] =
+        ioctl(fd, VIDIOC_G_CTRL, &control) == 0 ? json(control.value) : json(nullptr);
+  }
+  ::close(fd);
+  const auto &values = result["controls"];
+  if (values["auto_exposure"].is_null() || values["exposure_time_absolute"].is_null())
+    result["warning"] = "Camera exposure readback unavailable";
+  else if (values["auto_exposure"] != V4L2_EXPOSURE_MANUAL ||
+           values["exposure_time_absolute"] != 4500)
+    result["warning"] = "Camera exposure differs from requested manual 4500";
+#else
+  (void)applyExposure;
+  result["warning"] = "V4L2 settings unavailable on this platform";
+#endif
+  return result;
 }
 std::string timestamp() {
   auto t = std::chrono::system_clock::now();
@@ -60,25 +123,20 @@ void Rig::capture(int i) {
   try {
     cv::VideoCapture cap;
     if (!demo) {
-#ifdef __linux__
-      int fd = ::open(devices[i].c_str(), O_RDWR | O_NONBLOCK);
-      require(fd >= 0, "Cannot open V4L2 camera");
-      v4l2_control mode{};
-      mode.id = V4L2_CID_EXPOSURE_AUTO;
-      mode.value = V4L2_EXPOSURE_MANUAL;
-      int a = ioctl(fd, VIDIOC_S_CTRL, &mode);
-      mode.id = V4L2_CID_EXPOSURE_ABSOLUTE;
-      mode.value = 4500;
-      int b = ioctl(fd, VIDIOC_S_CTRL, &mode);
-      ::close(fd);
-      require(a == 0 && b == 0, "Cannot set manual exposure 4500");
-#endif
       cap.open(devices[i], cv::CAP_V4L2);
       require(cap.isOpened(), "Cannot open capture");
       cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('Y', 'U', 'Y', 'V'));
       cap.set(cv::CAP_PROP_FRAME_WIDTH, 640);
       cap.set(cv::CAP_PROP_FRAME_HEIGHT, 480);
       cap.set(cv::CAP_PROP_FPS, 30);
+      // Opening/configuring the device can reset controls. Start streaming first,
+      // then set exposure while the capture descriptor stays open.
+      cv::Mat warmup;
+      require(cap.read(warmup), "Cannot start camera stream before applying exposure");
+      auto settings = cameraSettings(i, true);
+      settings["phase"] = "after_stream_start";
+      std::lock_guard<std::mutex> guard(mutex);
+      camera[i]["settings"] = settings;
     }
     double started = now();
     int count = 0;
@@ -104,7 +162,9 @@ void Rig::capture(int i) {
       history[i].push_back({stamp, frame, count});
       if (history[i].size() > 8)
         history[i].pop_front();
-      camera[i] = {{"frames", count}, {"fps", count / (now() - started)}, {"error", nullptr}};
+      camera[i]["frames"] = count;
+      camera[i]["fps"] = count / (now() - started);
+      camera[i]["error"] = nullptr;
       if (recording) {
         writers[i].write(frame);
         csv[i] << counts[i]++ << ',' << stamp << '\n';
@@ -450,6 +510,16 @@ int serve(fs::path output, bool demo, int port, const fs::path &web,
       std::lock_guard<std::mutex> guard(progressMutex);
       data["processing"] = processing;
     }
+    reply(r, data);
+  });
+  server.Get("/api/cameras/settings", [&](const auto &, auto &r) {
+    auto data = rig.status();
+    data["demo"] = demo;
+    data["current_controls"] = json::array();
+    if (!demo)
+      for (int i = 0; i < 3; ++i)
+        data["current_controls"].push_back(cameraSettings(i, false));
+    r.set_header("Content-Disposition", "attachment; filename=camera_settings.json");
     reply(r, data);
   });
   server.Get("/api/vulkan", [&](const auto &, auto &r) { reply(r, vulkanInfo()); });
